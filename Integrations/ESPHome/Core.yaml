@@ -29,6 +29,21 @@ external_components:
       path: custom_components
 
 api:
+  reboot_timeout: 0s
+  on_client_connected:
+    - delay: 90s
+    - if:
+        condition:
+          or:
+            - binary_sensor.is_on: ota_mode
+            - switch.is_on: prevent_sleep
+        then:
+          - lambda: |-
+              ESP_LOGW("Apollo", "Preventing Deep Sleep Due To OTA Or Switch");
+              id(deep_sleep_1).prevent_deep_sleep();
+        else:
+          - deep_sleep.enter:
+              id: deep_sleep_1
   services:
     - service: play_buzzer
       variables:
@@ -60,8 +75,13 @@ i2c:
   scl: GPIO17
   id: bus_a
 
-web_server:  
+web_server:
   port: 80
+
+deep_sleep:
+  id: deep_sleep_1
+  sleep_duration: 5min
+  run_duration: 2min
 
 one_wire:
   - platform: gpio
@@ -127,6 +147,23 @@ binary_sensor:
     on_release:
       then:
         - light.turn_off: rgb_light
+
+  - platform: homeassistant
+    name: "OTA Mode"
+    id: ota_mode
+    entity_id: input_boolean.apollo_ota_mode
+    on_press:
+      then:
+        - lambda: |-
+            id(deep_sleep_1).prevent_deep_sleep();
+    on_release:
+      then:
+        - if:
+            condition:
+              switch.is_off: prevent_sleep
+            then:
+              - lambda: |-
+                  id(deep_sleep_1).allow_deep_sleep();
 
 sensor:
   - platform: internal_temperature
@@ -516,6 +553,26 @@ number:
     mode: box
     entity_category: config
 
+  # Deep sleep duration configuration
+  - platform: template
+    name: "Sleep Duration"
+    id: deep_sleep_sleep_duration
+    min_value: 0
+    max_value: 24
+    step: 0.1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 0.083
+    icon: "mdi:arrow-collapse-right"
+    entity_category: CONFIG
+    unit_of_measurement: "h"
+    on_value:
+      then:
+        - lambda: |-
+            id(deep_sleep_1).set_sleep_duration(x * 60 * 60 * 1000);
+
 switch:
   - platform: factory_reset
     id: factory_reset_switch
@@ -543,9 +600,29 @@ switch:
 
   - platform: template
     name: "Alarm Outside Total PM Range"
-    id: alarm_outside_total_pm_range    
+    id: alarm_outside_total_pm_range
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: template
+    name: "Prevent Sleep"
+    id: prevent_sleep
+    icon: mdi:sleep
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    entity_category: "config"
+    on_turn_on:
+      then:
+        - lambda: |-
+            id(deep_sleep_1).prevent_deep_sleep();
+    on_turn_off:
+      then:
+        - if:
+            condition:
+              binary_sensor.is_off: ota_mode
+            then:
+              - lambda: |-
+                  id(deep_sleep_1).allow_deep_sleep();
 
 interval:
   - interval: 10s
