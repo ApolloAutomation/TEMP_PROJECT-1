@@ -362,6 +362,11 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
 
+  # Dallas Temperature Probe
+  - platform: dallas_temp
+    name: "Temperature Probe (Dallas)"
+    update_interval: 60s
+
 light:
   - platform: esp32_rmt_led_strip
     id: rgb_light
