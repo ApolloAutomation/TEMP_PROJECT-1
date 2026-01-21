@@ -70,28 +70,34 @@ api:
                 // Check alarm conditions directly
                 id(alarm_triggered_on_wake) = false;
 
-                // Check temperature alarm
+                // Check temperature alarm (only if value is valid)
                 if (id(alarm_outside_temp_range).state &&
+                    !std::isnan(id(sht_temperature).state) &&
                     (id(sht_temperature).state > id(max_temp).state || id(sht_temperature).state < id(min_temp).state)) {
                   id(alarm_triggered_on_wake) = true;
                   ESP_LOGW("Apollo", "Temperature alarm triggered");
                 }
 
-                // Check humidity alarm
+                // Check humidity alarm (only if value is valid)
                 if (id(alarm_outside_humidity_range).state &&
+                    !std::isnan(id(sht_humidity).state) &&
                     (id(sht_humidity).state > id(max_humidity).state || id(sht_humidity).state < id(min_humidity).state)) {
                   id(alarm_triggered_on_wake) = true;
                   ESP_LOGW("Apollo", "Humidity alarm triggered");
                 }
 
-                // Check PM mass alarm
-                if (id(alarm_outside_total_pm_range).state && id(pm_10_0).state >= id(max_total_pm).state) {
+                // Check PM mass alarm (only if value is valid)
+                if (id(alarm_outside_total_pm_range).state &&
+                    !std::isnan(id(pm_10_0).state) &&
+                    id(pm_10_0).state >= id(max_total_pm).state) {
                   id(alarm_triggered_on_wake) = true;
                   ESP_LOGW("Apollo", "PM mass alarm triggered");
                 }
 
-                // Check PM count alarm
-                if (id(alarm_outside_total_pm_count_range).state && id(total_pm_count).state >= id(max_total_pm_count).state) {
+                // Check PM count alarm (only if value is valid)
+                if (id(alarm_outside_total_pm_count_range).state &&
+                    !std::isnan(id(total_pm_count).state) &&
+                    id(total_pm_count).state >= id(max_total_pm_count).state) {
                   id(alarm_triggered_on_wake) = true;
                   ESP_LOGW("Apollo", "PM count alarm triggered: %.0f >= %.0f", id(total_pm_count).state, id(max_total_pm_count).state);
                 }
@@ -194,22 +200,22 @@ binary_sensor:
   - platform: template
     name: Alarm Temperature Within Range
     id: temp_within_range
-    lambda: 'return (id(sht_temperature).state <= id(max_temp).state) && (id(sht_temperature).state >= id(min_temp).state);'
+    lambda: 'return std::isnan(id(sht_temperature).state) || ((id(sht_temperature).state <= id(max_temp).state) && (id(sht_temperature).state >= id(min_temp).state));'
 
   - platform: template
     name: Alarm Humidity Within Range
     id: humidity_within_range
-    lambda: 'return (id(sht_humidity).state <= id(max_humidity).state) && (id(sht_humidity).state >= id(min_humidity).state);'
+    lambda: 'return std::isnan(id(sht_humidity).state) || ((id(sht_humidity).state <= id(max_humidity).state) && (id(sht_humidity).state >= id(min_humidity).state));'
 
   - platform: template
     name: Alarm Total PM Within Range
     id: total_pm_within_range
-    lambda: 'return (id(pm_10_0).state < id(max_total_pm).state);'
+    lambda: 'return std::isnan(id(pm_10_0).state) || (id(pm_10_0).state < id(max_total_pm).state);'
 
   - platform: template
     name: Alarm Total PM Count Within Range
     id: total_pm_count_within_range
-    lambda: 'return (id(total_pm_count).state < id(max_total_pm_count).state);'
+    lambda: 'return std::isnan(id(total_pm_count).state) || (id(total_pm_count).state < id(max_total_pm_count).state);'
 
   - platform: template
     name: Alarm Active
@@ -718,25 +724,25 @@ switch:
     name: "Alarm Outside Temp Range"
     id: alarm_outside_temp_range
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
+    restore_mode: RESTORE_DEFAULT_OFF
 
   - platform: template
     name: "Alarm Outside Humidity Range"
     id: alarm_outside_humidity_range
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
+    restore_mode: RESTORE_DEFAULT_OFF
 
   - platform: template
     name: "Alarm Outside Total PM Range"
     id: alarm_outside_total_pm_range
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
+    restore_mode: RESTORE_DEFAULT_OFF
 
   - platform: template
     name: "Alarm Outside Total PM Count Range"
     id: alarm_outside_total_pm_count_range
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
+    restore_mode: RESTORE_DEFAULT_OFF
 
   - platform: template
     name: "Prevent Sleep"
