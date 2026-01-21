@@ -67,8 +67,50 @@ api:
             - lambda: |-
                 id(reportAllValues).execute();
             - delay: 5s
-            - deep_sleep.enter:
-                id: deep_sleep_1
+            - lambda: |-
+                // Check alarm conditions directly
+                id(alarm_triggered_on_wake) = false;
+
+                // Check temperature alarm
+                if (id(alarm_outside_temp_range).state &&
+                    (id(sht_temperature).state > id(max_temp).state || id(sht_temperature).state < id(min_temp).state)) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "Temperature alarm triggered");
+                }
+
+                // Check humidity alarm
+                if (id(alarm_outside_humidity_range).state &&
+                    (id(sht_humidity).state > id(max_humidity).state || id(sht_humidity).state < id(min_humidity).state)) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "Humidity alarm triggered");
+                }
+
+                // Check PM mass alarm
+                if (id(alarm_outside_total_pm_range).state && id(pm_10_0).state >= id(max_total_pm).state) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "PM mass alarm triggered");
+                }
+
+                // Check PM count alarm
+                if (id(alarm_outside_total_pm_count_range).state && id(total_pm_count).state >= id(max_total_pm_count).state) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "PM count alarm triggered: %.0f >= %.0f", id(total_pm_count).state, id(max_total_pm_count).state);
+                }
+
+                if (id(alarm_triggered_on_wake)) {
+                  ESP_LOGW("Apollo", "Alarm Active - Staying Awake");
+                  id(deep_sleep_1).prevent_deep_sleep();
+                  // Trigger alarm sound and light
+                  id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
+                  id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
+                  id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;");
+                }
+            - if:
+                condition:
+                  lambda: 'return !id(alarm_triggered_on_wake);'
+                then:
+                  - deep_sleep.enter:
+                      id: deep_sleep_1
 
 globals:
   - id: cycleCounter
@@ -79,6 +121,10 @@ globals:
     restore_value: no
     type: uint32_t
     initial_value: '0'
+  - id: alarm_triggered_on_wake
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   - id: last_temp_update
     type: uint32_t
     restore_value: no
@@ -159,9 +205,14 @@ binary_sensor:
     lambda: 'return (id(pm_10_0).state < id(max_total_pm).state);'
 
   - platform: template
+    name: Total PM Count Within Range
+    id: total_pm_count_within_range
+    lambda: 'return (id(total_pm_count).state < id(max_total_pm_count).state);'
+
+  - platform: template
     name: Alarm Active
     id: alarm_active
-    lambda: 'return (id(alarm_outside_temp_range).state && !id(temp_within_range).state) || (id(alarm_outside_humidity_range).state && !id(humidity_within_range).state) || (id(alarm_outside_total_pm_range).state && !id(total_pm_within_range).state);'
+    lambda: 'return (id(alarm_outside_temp_range).state && !id(temp_within_range).state) || (id(alarm_outside_humidity_range).state && !id(humidity_within_range).state) || (id(alarm_outside_total_pm_range).state && !id(total_pm_within_range).state) || (id(alarm_outside_total_pm_count_range).state && !id(total_pm_count_within_range).state);'
     on_release:
       then:
         - light.turn_off: rgb_light
@@ -418,6 +469,21 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
 
+  - platform: template
+    name: "Total PM Count"
+    id: total_pm_count
+    lambda: |-
+      return id(pm0_3_to_0_5_number).state +
+             id(pm0_5_to_1_number).state +
+             id(pm1_to_2_5_number).state +
+             id(pm2_5_to_4_number).state +
+             id(pm4_to_10_number).state;
+    unit_of_measurement: "#/m³"
+    state_class: measurement
+    icon: mdi:air-filter
+    update_interval: 10s
+    accuracy_decimals: 0
+
   # Dallas Temperature Probe
   - platform: dallas_temp
     name: "Temperature Probe (Dallas)"
@@ -587,6 +653,20 @@ number:
     mode: box
     entity_category: config
 
+  - platform: template
+    id: max_total_pm_count
+    name: Max Total PM Count
+    min_value: 0
+    max_value: 10000000000
+    step: 1000000
+    unit_of_measurement: '#/m³'
+    initial_value: 1000000000
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: box
+    entity_category: config
+
   # Deep sleep duration configuration
   - platform: template
     name: "Sleep Duration"
@@ -622,21 +702,27 @@ switch:
 
   - platform: template
     name: "Alarm Outside Temp Range"
-    id: alarm_outside_temp_range    
+    id: alarm_outside_temp_range
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    
+    restore_mode: RESTORE_DEFAULT_ON
+
   - platform: template
     name: "Alarm Outside Humidity Range"
-    id: alarm_outside_humidity_range    
+    id: alarm_outside_humidity_range
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: RESTORE_DEFAULT_ON
 
   - platform: template
     name: "Alarm Outside Total PM Range"
     id: alarm_outside_total_pm_range
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "Alarm Outside Total PM Count Range"
+    id: alarm_outside_total_pm_count_range
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
 
   - platform: template
     name: "Prevent Sleep"
