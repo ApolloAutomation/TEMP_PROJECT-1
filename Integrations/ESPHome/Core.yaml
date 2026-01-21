@@ -190,22 +190,22 @@ binary_sensor:
             }
 
   - platform: template
-    name: Temperature Within Range
+    name: Alarm Temperature Within Range
     id: temp_within_range
     lambda: 'return (id(sht_temperature).state <= id(max_temp).state) && (id(sht_temperature).state >= id(min_temp).state);'
 
   - platform: template
-    name: Humidity Within Range
+    name: Alarm Humidity Within Range
     id: humidity_within_range
     lambda: 'return (id(sht_humidity).state <= id(max_humidity).state) && (id(sht_humidity).state >= id(min_humidity).state);'
 
   - platform: template
-    name: Total PM Within Range
+    name: Alarm Total PM Within Range
     id: total_pm_within_range
     lambda: 'return (id(pm_10_0).state < id(max_total_pm).state);'
 
   - platform: template
-    name: Total PM Count Within Range
+    name: Alarm Total PM Count Within Range
     id: total_pm_count_within_range
     lambda: 'return (id(total_pm_count).state < id(max_total_pm_count).state);'
 
@@ -216,6 +216,18 @@ binary_sensor:
     on_release:
       then:
         - light.turn_off: rgb_light
+        - if:
+            condition:
+              and:
+                - switch.is_off: prevent_sleep
+                - binary_sensor.is_off: ota_mode
+            then:
+              - lambda: |-
+                  ESP_LOGW("Apollo", "Alarm cleared - going back to sleep");
+                  id(deep_sleep_1).allow_deep_sleep();
+              - delay: 2s
+              - deep_sleep.enter:
+                  id: deep_sleep_1
 
   - platform: homeassistant
     name: "OTA Mode"
@@ -408,7 +420,7 @@ sensor:
       accuracy_decimals: 0
       disabled_by_default: true
     typical_particle_size:
-      name: "Typical Particle Size"
+      name: "PM Typical Particle Size"
       id: typical_particle_size
       accuracy_decimals: 2
       disabled_by_default: true
@@ -470,7 +482,7 @@ sensor:
     accuracy_decimals: 0
 
   - platform: template
-    name: "Total PM Count"
+    name: "PM Total Count"
     id: total_pm_count
     lambda: |-
       return id(pm0_3_to_0_5_number).state +
