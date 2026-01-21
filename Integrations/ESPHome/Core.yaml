@@ -5,15 +5,27 @@ substitutions:
 esphome:
   name: temp-pro-1
   on_boot:
-    priority: -100  # Run after everything else is initialized
-    then:
-      - delay: 5s
-      - lambda: |-
-          // Force initial updates on boot
-          id(sht_temperature).publish_state(id(sht_temperature_raw).state);
-          id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-          id(last_temp_update) = millis();
-          id(last_humidity_update) = millis();
+    - priority: 500
+      then:
+        - lambda: |-
+            id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 60 * 1000);
+        - if:
+            condition:
+              or:
+                - binary_sensor.is_on: ota_mode
+                - switch.is_on: prevent_sleep
+            then:
+              - lambda: |-
+                  ESP_LOGW("Apollo", "Preventing Deep Sleep Due To OTA Or Switch On Boot");
+                  id(deep_sleep_1).prevent_deep_sleep();
+    - priority: -100
+      then:
+        - lambda: |-
+            // Force initial updates on boot
+            id(sht_temperature).publish_state(id(sht_temperature_raw).state);
+            id(sht_humidity).publish_state(id(sht_humidity_raw).state);
+            id(last_temp_update) = millis();
+            id(last_humidity_update) = millis();
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -27,23 +39,10 @@ external_components:
   - source:
       type: local
       path: custom_components
+  - source: github://ApolloAutomation/esphome-battery-component
+    components: [max17048]
 
 api:
-  reboot_timeout: 0s
-  on_client_connected:
-    - delay: 90s
-    - if:
-        condition:
-          or:
-            - binary_sensor.is_on: ota_mode
-            - switch.is_on: prevent_sleep
-        then:
-          - lambda: |-
-              ESP_LOGW("Apollo", "Preventing Deep Sleep Due To OTA Or Switch");
-              id(deep_sleep_1).prevent_deep_sleep();
-        else:
-          - deep_sleep.enter:
-              id: deep_sleep_1
   services:
     - service: play_buzzer
       variables:
@@ -51,6 +50,25 @@ api:
       then:
         - rtttl.play:
             rtttl: !lambda 'return song_str;'
+  reboot_timeout: 0s
+  on_client_connected:
+    then:
+      - if:
+          condition:
+            or:
+              - binary_sensor.is_on: ota_mode
+              - switch.is_on: prevent_sleep
+          then:
+            - lambda: |-
+                ESP_LOGW("Apollo", "Preventing Deep Sleep Due To OTA Or Switch");
+          else:
+            - switch.turn_on: accessory_power
+            - delay: 5s
+            - lambda: |-
+                id(reportAllValues).execute();
+            - delay: 5s
+            - deep_sleep.enter:
+                id: deep_sleep_1
 
 globals:
   - id: cycleCounter
@@ -80,8 +98,8 @@ web_server:
 
 deep_sleep:
   id: deep_sleep_1
-  sleep_duration: 5min
-  run_duration: 2min
+  sleep_duration: 1h
+  run_duration: 90s
 
 one_wire:
   - platform: gpio
@@ -177,6 +195,7 @@ sensor:
     update_interval: 60s
 
   - platform: sht3xd
+    id: sht3xd_sensor
     temperature:
       name: "Temperature Raw"
       id: sht_temperature_raw
@@ -209,7 +228,7 @@ sensor:
     update_interval: never
 
   - platform: sen5x
-    id: sen54
+    id: sen55
     pm_1_0:
       name: "PM <1µm Weight concentration"
       id: pm_1_0
@@ -402,7 +421,22 @@ sensor:
   # Dallas Temperature Probe
   - platform: dallas_temp
     name: "Temperature Probe (Dallas)"
+    id: dallas_temp_probe
     update_interval: 60s
+
+  # Battery monitoring
+  - platform: max17048
+    id: max_17048
+    battery_voltage:
+      name: Battery voltage
+      id: batt_v
+    battery_level:
+      name: Battery level
+      id: batt_pct
+      filters:
+        - lambda: |
+            if (x > 100) return 100;
+            else return (x);
 
 light:
   - platform: esp32_rmt_led_strip
@@ -557,14 +591,14 @@ number:
   - platform: template
     name: "Sleep Duration"
     id: deep_sleep_sleep_duration
-    min_value: 0
+    min_value: 0.01
     max_value: 24
-    step: 0.1
+    step: 0.01
     mode: box
     update_interval: never
     optimistic: true
     restore_value: true
-    initial_value: 0.083
+    initial_value: 1
     icon: "mdi:arrow-collapse-right"
     entity_category: CONFIG
     unit_of_measurement: "h"
@@ -655,6 +689,14 @@ interval:
             id(sht_humidity).publish_state(id(sht_humidity_raw).state);
             id(last_humidity_update) = millis();
           }
+
+script:
+  - id: reportAllValues
+    then:
+      - component.update: sen55
+      - component.update: sht3xd_sensor
+      - component.update: dallas_temp_probe
+      - component.update: sen5x_number_component
 
 text_sensor:
   - platform: template
