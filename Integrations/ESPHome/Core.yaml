@@ -1,12 +1,13 @@
 substitutions:
-  version: "25.8.25.1"
+  version: "26.1.21.1"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
 esphome:
   name: temp-pro-1
   on_boot:
-    - priority: 500
+    - priority: -100
       then:
+        - delay: 2s
         - lambda: |-
             id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 60 * 1000);
         - if:
@@ -18,8 +19,6 @@ esphome:
               - lambda: |-
                   ESP_LOGW("Apollo", "Preventing Deep Sleep Due To OTA Or Switch On Boot");
                   id(deep_sleep_1).prevent_deep_sleep();
-    - priority: -100
-      then:
         - lambda: |-
             // Force initial updates on boot
             id(sht_temperature).publish_state(id(sht_temperature_raw).state);
@@ -107,7 +106,10 @@ api:
                 }
             - if:
                 condition:
-                  lambda: 'return !id(alarm_triggered_on_wake);'
+                  and:
+                    - lambda: 'return !id(alarm_triggered_on_wake);'
+                    - switch.is_off: prevent_sleep
+                    - binary_sensor.is_off: ota_mode
                 then:
                   - deep_sleep.enter:
                       id: deep_sleep_1
@@ -796,12 +798,31 @@ script:
       - component.update: dallas_temp_probe
       - component.update: sen5x_number_component
       - component.update: max_17048
+      - delay: 2s
       - lambda: |-
           // Publish SHT temperature and humidity values
           id(sht_temperature).publish_state(id(sht_temperature_raw).state);
           id(sht_humidity).publish_state(id(sht_humidity_raw).state);
           id(last_temp_update) = millis();
           id(last_humidity_update) = millis();
+
+          // Publish total PM count using raw sensor values directly
+          // pm_0_5_number = 0.3-0.5 range (cumulative <0.5)
+          // Ranges: 0.3-0.5, 0.5-1, 1-2.5, 2.5-4, 4-10
+          float pm_0_3_to_0_5 = id(pm_0_5_number).state;
+          float pm_0_5_to_1 = std::max(0.0f, id(pm_1_0_number).state - id(pm_0_5_number).state);
+          float pm_1_to_2_5 = std::max(0.0f, id(pm_2_5_number).state - id(pm_1_0_number).state);
+          float pm_2_5_to_4 = std::max(0.0f, id(pm_4_0_number).state - id(pm_2_5_number).state);
+          float pm_4_to_10 = std::max(0.0f, id(pm_10_0_number).state - id(pm_4_0_number).state);
+
+          float total_count = pm_0_3_to_0_5 + pm_0_5_to_1 + pm_1_to_2_5 + pm_2_5_to_4 + pm_4_to_10;
+
+          if (!std::isnan(total_count)) {
+            id(total_pm_count).publish_state(total_count);
+            ESP_LOGI("Apollo", "Total PM Count: %.0f", total_count);
+          } else {
+            ESP_LOGW("Apollo", "Total PM Count is NaN, skipping publish");
+          }
 
 text_sensor:
   - platform: template
