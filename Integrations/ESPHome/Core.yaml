@@ -697,6 +697,13 @@ script:
       - component.update: sht3xd_sensor
       - component.update: dallas_temp_probe
       - component.update: sen5x_number_component
+      - component.update: max_17048
+      - lambda: |-
+          // Publish SHT temperature and humidity values
+          id(sht_temperature).publish_state(id(sht_temperature_raw).state);
+          id(sht_humidity).publish_state(id(sht_humidity_raw).state);
+          id(last_temp_update) = millis();
+          id(last_humidity_update) = millis();
 
 text_sensor:
   - platform: template
