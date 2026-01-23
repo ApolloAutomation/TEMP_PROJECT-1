@@ -841,11 +841,17 @@ text_sensor:
     entity_category: "diagnostic"
     internal: true
 
-  - platform: wifi_info
-    mac_address:
-      name: "Device ID"
-      id: device_mac_address
-      internal: true
+  - platform: template
+    name: "Device ID"
+    id: device_mac_address
+    internal: true
+    lambda: |-
+      uint8_t mac[6];
+      esp_read_mac(mac, ESP_MAC_WIFI_STA);
+      char buf[18];
+      snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+      return std::string(buf);
 
   - platform: template
     name: "Device Name"

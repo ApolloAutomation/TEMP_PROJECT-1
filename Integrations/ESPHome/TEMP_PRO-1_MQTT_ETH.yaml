@@ -1,13 +1,13 @@
 esphome:
-  name: "apollo-temp-pro-1-mqtt"
-  friendly_name: Apollo TEMP_PRO-1 MQTT
-  comment: Apollo TEMP_PRO-1 MQTT
+  name: "apollo-tmp-pro-1-mqtte"
+  friendly_name: Apollo TEMP_PRO-1 MQTT ETH
+  comment: Apollo TEMP_PRO-1 MQTT ETH
   name_add_mac_suffix: true
   platformio_options:
     board_build.flash_mode: dio
 
   project:
-    name: "ApolloAutomation.TEMP_PRO-1-MQTT"
+    name: "ApolloAutomation.TEMP_PRO-1-MQTT-ETH"
     version: "${version}"
 
   min_version: 2025.2.0
@@ -40,15 +40,18 @@ safe_mode:
 
 logger:
 
-wifi:
-  ap:
-    ssid: "Apollo TEMP_PRO-1 MQTT Hotspot"
+ethernet:
+  type: W5500
+  clk_pin: GPIO10
+  mosi_pin: GPIO12
+  miso_pin: GPIO11
+  cs_pin: GPIO9
+  interrupt_pin: GPIO13
+  reset_pin: GPIO14
   manual_ip:
     static_ip: !secret static_ip
     gateway: !secret gateway
     subnet: !secret subnet
-
-captive_portal:
 
 # MQTT Configuration
 mqtt:
@@ -297,25 +300,13 @@ script:
                 green: 0%
                 blue: 100%
           else:
-            - if:
-                condition:
-                  - wifi.connected
-                then:
-                  - logger.log: "Apollo Automation: Connected To Wifi"
-                  - light.turn_on:
-                      id: rgb_light
-                      brightness: 100%
-                      red: 0%
-                      green: 100%
-                      blue: 0%
-                else:
-                  - logger.log: "Apollo Automation: Not Connected To Wifi"
-                  - light.turn_on:
-                      id: rgb_light
-                      brightness: 100%
-                      red: 100%
-                      green: 100%
-                      blue: 0%
+            - logger.log: "Apollo Automation: Not Connected To MQTT"
+            - light.turn_on:
+                id: rgb_light
+                brightness: 100%
+                red: 100%
+                green: 100%
+                blue: 0%
       - delay: 5s
       - light.turn_off: rgb_light
 
