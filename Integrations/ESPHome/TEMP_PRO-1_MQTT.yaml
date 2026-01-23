@@ -1,0 +1,272 @@
+esphome:
+  name: "apollo-temp-pro-1-mqtt"
+  friendly_name: Apollo TEMP_PRO-1 MQTT
+  comment: Apollo TEMP_PRO-1 MQTT
+  name_add_mac_suffix: true
+  platformio_options:
+    board_build.flash_mode: dio
+
+  project:
+    name: "ApolloAutomation.TEMP_PRO-1-MQTT"
+    version: "${version}"
+
+  min_version: 2025.2.0
+
+  on_boot:
+    - priority: -100
+      then:
+        - delay: 2s
+        - lambda: |-
+            id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 60 * 1000);
+        - if:
+            condition:
+              switch.is_on: prevent_sleep
+            then:
+              - lambda: |-
+                  ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch On Boot");
+                  id(deep_sleep_1).prevent_deep_sleep();
+        - lambda: |-
+            // Force initial updates on boot
+            id(sht_temperature).publish_state(id(sht_temperature_raw).state);
+            id(sht_humidity).publish_state(id(sht_humidity_raw).state);
+            id(last_temp_update) = millis();
+            id(last_humidity_update) = millis();
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+
+safe_mode:
+
+logger:
+
+wifi:
+  ap:
+    ssid: "Apollo TEMP_PRO-1 MQTT Hotspot"
+
+captive_portal:
+
+# MQTT Configuration
+mqtt:
+  broker: 192.168.1.155
+  port: 1883
+  # Uncomment and set these when authentication is enabled:
+  # username: your_username
+  # password: your_password
+
+  topic_prefix: apollo/temp-pro-1
+
+  on_connect:
+    then:
+      - logger.log: "Connected to MQTT broker"
+      - if:
+          condition:
+            switch.is_on: prevent_sleep
+          then:
+            - lambda: |-
+                ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch");
+          else:
+            - switch.turn_on: accessory_power
+            - delay: 5s
+            - lambda: |-
+                id(reportAllValues).execute();
+            - delay: 5s
+            - lambda: |-
+                // Check alarm conditions directly
+                id(alarm_triggered_on_wake) = false;
+
+                // Check temperature alarm (only if value is valid)
+                if (id(alarm_outside_temp_range).state &&
+                    !std::isnan(id(sht_temperature).state) &&
+                    (id(sht_temperature).state > id(max_temp).state || id(sht_temperature).state < id(min_temp).state)) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "Temperature alarm triggered");
+                }
+
+                // Check humidity alarm (only if value is valid)
+                if (id(alarm_outside_humidity_range).state &&
+                    !std::isnan(id(sht_humidity).state) &&
+                    (id(sht_humidity).state > id(max_humidity).state || id(sht_humidity).state < id(min_humidity).state)) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "Humidity alarm triggered");
+                }
+
+                // Check PM mass alarm (only if value is valid)
+                if (id(alarm_outside_total_pm_range).state &&
+                    !std::isnan(id(pm_10_0).state) &&
+                    id(pm_10_0).state >= id(max_total_pm).state) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "PM mass alarm triggered");
+                }
+
+                // Check PM count alarm (only if value is valid)
+                if (id(alarm_outside_total_pm_count_range).state &&
+                    !std::isnan(id(total_pm_count).state) &&
+                    id(total_pm_count).state >= id(max_total_pm_count).state) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "PM count alarm triggered: %.0f >= %.0f", id(total_pm_count).state, id(max_total_pm_count).state);
+                }
+
+                if (id(alarm_triggered_on_wake)) {
+                  ESP_LOGW("Apollo", "Alarm Active - Staying Awake");
+                  id(deep_sleep_1).prevent_deep_sleep();
+                  // Trigger alarm sound and light
+                  id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
+                  id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
+                  id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;");
+                }
+            - if:
+                condition:
+                  and:
+                    - lambda: 'return !id(alarm_triggered_on_wake);'
+                    - switch.is_off: prevent_sleep
+                then:
+                  - deep_sleep.enter:
+                      id: deep_sleep_1
+
+  on_message:
+    # Restart command
+    - topic: apollo/temp-pro-1/command/restart
+      then:
+        - logger.log: "Restart command received via MQTT"
+        - button.press: esp_reboot
+
+    # Prevent sleep control
+    - topic: apollo/temp-pro-1/command/prevent_sleep
+      then:
+        - lambda: |-
+            if (x == "ON" || x == "on" || x == "1" || x == "true") {
+              id(prevent_sleep).turn_on();
+            } else {
+              id(prevent_sleep).turn_off();
+            }
+
+    # RGB Light ON - turns on white at full brightness
+    - topic: apollo/temp-pro-1/command/light/on
+      then:
+        - light.turn_on:
+            id: rgb_light
+            brightness: 100%
+            red: 100%
+            green: 100%
+            blue: 100%
+
+    # RGB Light OFF
+    - topic: apollo/temp-pro-1/command/light/off
+      then:
+        - light.turn_off: rgb_light
+
+    # RGB Light RED
+    - topic: apollo/temp-pro-1/command/light/red
+      then:
+        - light.turn_on:
+            id: rgb_light
+            brightness: 100%
+            red: 100%
+            green: 0%
+            blue: 0%
+
+    # RGB Light GREEN
+    - topic: apollo/temp-pro-1/command/light/green
+      then:
+        - light.turn_on:
+            id: rgb_light
+            brightness: 100%
+            red: 0%
+            green: 100%
+            blue: 0%
+
+    # RGB Light BLUE
+    - topic: apollo/temp-pro-1/command/light/blue
+      then:
+        - light.turn_on:
+            id: rgb_light
+            brightness: 100%
+            red: 0%
+            green: 0%
+            blue: 100%
+
+    # RGB Light custom color - payload format: "r,g,b" (0-255)
+    - topic: apollo/temp-pro-1/command/light/rgb
+      then:
+        - lambda: |-
+            int r = 0, g = 0, b = 0;
+            if (sscanf(x.c_str(), "%d,%d,%d", &r, &g, &b) == 3) {
+              auto call = id(rgb_light).turn_on();
+              call.set_rgb(r / 255.0f, g / 255.0f, b / 255.0f);
+              call.set_brightness(1.0f);
+              call.perform();
+              ESP_LOGI("Apollo", "Light set to RGB(%d,%d,%d)", r, g, b);
+            }
+
+    # RGB Light effect - payload: "Slow Pulse", "Fast Pulse", or "none"
+    - topic: apollo/temp-pro-1/command/light/effect
+      then:
+        - lambda: |-
+            std::string effect = x;
+            auto call = id(rgb_light).turn_on();
+            if (effect == "none" || effect == "None" || effect == "off") {
+              call.set_effect("none");
+            } else {
+              call.set_effect(effect.c_str());
+            }
+            call.perform();
+            ESP_LOGI("Apollo", "Light effect set to: %s", effect.c_str());
+
+    # Sleep duration control - payload: hours (e.g., "1", "0.5", "2.5")
+    - topic: apollo/temp-pro-1/command/sleep_duration
+      then:
+        - lambda: |-
+            float hours = atof(x.c_str());
+            if (hours >= 0.01 && hours <= 24) {
+              id(deep_sleep_sleep_duration).publish_state(hours);
+              ESP_LOGI("Apollo", "Sleep duration set to %.2f hours", hours);
+            } else {
+              ESP_LOGW("Apollo", "Invalid sleep duration: %.2f (must be 0.01-24 hours)", hours);
+            }
+
+script:
+  - id: statusCheck
+    then:
+      - if:
+          condition:
+            - mqtt.connected
+          then:
+            - logger.log: "Apollo Automation: Connected To MQTT"
+            - light.turn_on:
+                id: rgb_light
+                brightness: 100%
+                red: 0%
+                green: 0%
+                blue: 100%
+          else:
+            - if:
+                condition:
+                  - wifi.connected
+                then:
+                  - logger.log: "Apollo Automation: Connected To Wifi"
+                  - light.turn_on:
+                      id: rgb_light
+                      brightness: 100%
+                      red: 0%
+                      green: 100%
+                      blue: 0%
+                else:
+                  - logger.log: "Apollo Automation: Not Connected To Wifi"
+                  - light.turn_on:
+                      id: rgb_light
+                      brightness: 100%
+                      red: 100%
+                      green: 100%
+                      blue: 0%
+      - delay: 5s
+      - light.turn_off: rgb_light
+
+button:
+  - platform: restart
+    icon: mdi:power-cycle
+    name: "ESP Reboot"
+    id: esp_reboot
+
+packages:
+  core: !include Core_MQTT.yaml
