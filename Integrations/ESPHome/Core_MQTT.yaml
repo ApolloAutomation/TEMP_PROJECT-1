@@ -44,6 +44,12 @@ i2c:
   scl: GPIO17
   id: bus_a
 
+# Time component for UTC timestamps
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: UTC
+
 web_server:
   port: 80
   include_internal: true
@@ -338,7 +344,17 @@ sensor:
       then:
         - mqtt.publish:
             topic: apollo/temp-pro-1/sensor/pm_0_3_to_0_5
-            payload: !lambda 'return to_string((int)x);'
+            payload: !lambda |-
+              char buf[256];
+              auto time = id(sntp_time).now();
+              snprintf(buf, sizeof(buf),
+                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
+                (int)x,
+                id(device_mac_address).state.c_str(),
+                App.get_name().c_str(),
+                time.year, time.month, time.day_of_month,
+                time.hour, time.minute, time.second);
+              return std::string(buf);
 
   - platform: template
     name: "PM 0.5 To 1 µm Number"
@@ -354,7 +370,17 @@ sensor:
       then:
         - mqtt.publish:
             topic: apollo/temp-pro-1/sensor/pm_0_5_to_1
-            payload: !lambda 'return to_string((int)x);'
+            payload: !lambda |-
+              char buf[256];
+              auto time = id(sntp_time).now();
+              snprintf(buf, sizeof(buf),
+                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
+                (int)x,
+                id(device_mac_address).state.c_str(),
+                App.get_name().c_str(),
+                time.year, time.month, time.day_of_month,
+                time.hour, time.minute, time.second);
+              return std::string(buf);
 
   - platform: template
     name: "PM 1 To 2.5 µm Number"
@@ -370,7 +396,17 @@ sensor:
       then:
         - mqtt.publish:
             topic: apollo/temp-pro-1/sensor/pm_1_to_2_5
-            payload: !lambda 'return to_string((int)x);'
+            payload: !lambda |-
+              char buf[256];
+              auto time = id(sntp_time).now();
+              snprintf(buf, sizeof(buf),
+                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
+                (int)x,
+                id(device_mac_address).state.c_str(),
+                App.get_name().c_str(),
+                time.year, time.month, time.day_of_month,
+                time.hour, time.minute, time.second);
+              return std::string(buf);
 
   - platform: template
     name: "PM 2.5 To 4 µm Number"
@@ -386,7 +422,17 @@ sensor:
       then:
         - mqtt.publish:
             topic: apollo/temp-pro-1/sensor/pm_2_5_to_4
-            payload: !lambda 'return to_string((int)x);'
+            payload: !lambda |-
+              char buf[256];
+              auto time = id(sntp_time).now();
+              snprintf(buf, sizeof(buf),
+                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
+                (int)x,
+                id(device_mac_address).state.c_str(),
+                App.get_name().c_str(),
+                time.year, time.month, time.day_of_month,
+                time.hour, time.minute, time.second);
+              return std::string(buf);
 
   - platform: template
     name: "PM 4 To 10 µm Number"
@@ -402,7 +448,17 @@ sensor:
       then:
         - mqtt.publish:
             topic: apollo/temp-pro-1/sensor/pm_4_to_10
-            payload: !lambda 'return to_string((int)x);'
+            payload: !lambda |-
+              char buf[256];
+              auto time = id(sntp_time).now();
+              snprintf(buf, sizeof(buf),
+                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
+                (int)x,
+                id(device_mac_address).state.c_str(),
+                App.get_name().c_str(),
+                time.year, time.month, time.day_of_month,
+                time.hour, time.minute, time.second);
+              return std::string(buf);
 
   - platform: template
     name: "PM Total Count"
@@ -423,7 +479,17 @@ sensor:
       then:
         - mqtt.publish:
             topic: apollo/temp-pro-1/sensor/pm_total_count
-            payload: !lambda 'return to_string((int)x);'
+            payload: !lambda |-
+              char buf[256];
+              auto time = id(sntp_time).now();
+              snprintf(buf, sizeof(buf),
+                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
+                (int)x,
+                id(device_mac_address).state.c_str(),
+                App.get_name().c_str(),
+                time.year, time.month, time.day_of_month,
+                time.hour, time.minute, time.second);
+              return std::string(buf);
 
   # Dallas Temperature Probe
   - platform: dallas_temp
@@ -451,7 +517,17 @@ sensor:
         then:
           - mqtt.publish:
               topic: apollo/temp-pro-1/sensor/battery_level
-              payload: !lambda 'return to_string((int)x);'
+              payload: !lambda |-
+                char buf[256];
+                auto time = id(sntp_time).now();
+                snprintf(buf, sizeof(buf),
+                  "{\"value\":%d,\"unit\":\"%%\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
+                  (int)x,
+                  id(device_mac_address).state.c_str(),
+                  App.get_name().c_str(),
+                  time.year, time.month, time.day_of_month,
+                  time.hour, time.minute, time.second);
+                return std::string(buf);
 
 light:
   - platform: esp32_rmt_led_strip

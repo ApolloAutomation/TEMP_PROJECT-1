@@ -70,9 +70,36 @@ mqtt:
           else:
             - switch.turn_on: accessory_power
             - delay: 5s
+            # Update all sensor components
+            - component.update: sen55
+            - component.update: sht3xd_sensor
+            - component.update: dallas_temp_probe
+            - component.update: sen5x_number_component
+            - component.update: max_17048
+            - delay: 3s
+            # Force publish PM number concentration values (triggers on_value -> mqtt.publish)
             - lambda: |-
-                id(reportAllValues).execute();
-            - delay: 5s
+                // Publish PM count range values
+                id(pm0_3_to_0_5_number).publish_state(id(pm_0_5_number).state);
+                id(pm0_5_to_1_number).publish_state(std::max(0.0f, id(pm_1_0_number).state - id(pm_0_5_number).state));
+                id(pm1_to_2_5_number).publish_state(std::max(0.0f, id(pm_2_5_number).state - id(pm_1_0_number).state));
+                id(pm2_5_to_4_number).publish_state(std::max(0.0f, id(pm_4_0_number).state - id(pm_2_5_number).state));
+                id(pm4_to_10_number).publish_state(std::max(0.0f, id(pm_10_0_number).state - id(pm_4_0_number).state));
+
+                // Calculate and publish total PM count
+                float total = id(pm_0_5_number).state +
+                              std::max(0.0f, id(pm_1_0_number).state - id(pm_0_5_number).state) +
+                              std::max(0.0f, id(pm_2_5_number).state - id(pm_1_0_number).state) +
+                              std::max(0.0f, id(pm_4_0_number).state - id(pm_2_5_number).state) +
+                              std::max(0.0f, id(pm_10_0_number).state - id(pm_4_0_number).state);
+                if (!std::isnan(total)) {
+                  id(total_pm_count).publish_state(total);
+                }
+
+                // Battery is already publishing via on_value from component.update
+                ESP_LOGI("Apollo", "All values published to MQTT");
+            # Wait for MQTT messages to be sent
+            - delay: 3s
             - lambda: |-
                 // Check alarm conditions directly
                 id(alarm_triggered_on_wake) = false;
