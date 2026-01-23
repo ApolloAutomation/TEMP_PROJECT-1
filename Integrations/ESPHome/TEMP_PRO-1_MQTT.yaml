@@ -54,7 +54,9 @@ mqtt:
   # username: your_username
   # password: your_password
 
-  topic_prefix: apollo/temp-pro-1
+  # Disable ALL automatic MQTT publishing - we manually publish only what we want
+  topic_prefix: null
+  discovery: false
 
   on_connect:
     then:
@@ -224,6 +226,31 @@ mqtt:
             } else {
               ESP_LOGW("Apollo", "Invalid sleep duration: %.2f (must be 0.01-24 hours)", hours);
             }
+
+    # Buzzer test - payload: RTTTL string or preset name (beep, siren, success, error)
+    - topic: apollo/temp-pro-1/command/buzzer
+      then:
+        - lambda: |-
+            std::string sound = x;
+            if (sound == "beep") {
+              id(rtttl_buzzer).play("beep:d=4,o=5,b=100:c");
+            } else if (sound == "siren") {
+              id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e");
+            } else if (sound == "success") {
+              id(rtttl_buzzer).play("success:d=4,o=5,b=100:c,e,g");
+            } else if (sound == "error") {
+              id(rtttl_buzzer).play("error:d=4,o=5,b=100:g,c");
+            } else {
+              // Assume it's a custom RTTTL string
+              id(rtttl_buzzer).play(sound.c_str());
+            }
+            ESP_LOGI("Apollo", "Buzzer playing: %s", sound.c_str());
+
+    # Buzzer stop
+    - topic: apollo/temp-pro-1/command/buzzer/stop
+      then:
+        - rtttl.stop:
+            id: rtttl_buzzer
 
 script:
   - id: statusCheck
