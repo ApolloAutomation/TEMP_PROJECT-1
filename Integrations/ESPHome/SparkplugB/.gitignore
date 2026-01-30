@@ -1,0 +1,3 @@
+# Gitignore for SparkplugB
+/.esphome/
+/secrets.yaml

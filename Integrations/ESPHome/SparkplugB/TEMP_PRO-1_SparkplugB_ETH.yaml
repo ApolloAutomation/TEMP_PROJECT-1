@@ -1,0 +1,235 @@
+substitutions:
+  # Sparkplug B Configuration
+  spb_group_id: "ApolloAutomation"
+
+esphome:
+  name: "apollo-tmp-pro-1-spb"
+  friendly_name: Apollo TEMP_PRO-1 Sparkplug B
+  comment: Apollo TEMP_PRO-1 Sparkplug B (Ethernet)
+  name_add_mac_suffix: true
+  platformio_options:
+    board_build.flash_mode: dio
+
+  project:
+    name: "ApolloAutomation.TEMP_PRO-1-SparkplugB"
+    version: "${version}"
+
+  min_version: 2025.2.0
+
+  # Include Sparkplug B header
+  includes:
+    - sparkplug_b.h
+
+  on_boot:
+    - priority: -100
+      then:
+        - delay: 2s
+        - lambda: |-
+            id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 60 * 1000);
+        - if:
+            condition:
+              switch.is_on: prevent_sleep
+            then:
+              - lambda: |-
+                  ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch On Boot");
+                  id(deep_sleep_1).prevent_deep_sleep();
+        - lambda: |-
+            // Force initial updates on boot
+            id(sht_temperature).publish_state(id(sht_temperature_raw).state);
+            id(sht_humidity).publish_state(id(sht_humidity_raw).state);
+            id(last_temp_update) = millis();
+            id(last_humidity_update) = millis();
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+
+safe_mode:
+
+logger:
+
+ethernet:
+  type: W5500
+  clk_pin: GPIO10
+  mosi_pin: GPIO12
+  miso_pin: GPIO11
+  cs_pin: GPIO9
+  interrupt_pin: GPIO13
+  reset_pin: GPIO14
+  manual_ip:
+    static_ip: !secret static_ip
+    gateway: !secret gateway
+    subnet: !secret subnet
+
+# MQTT Configuration for Sparkplug B
+mqtt:
+  id: mqtt_client
+  broker: !secret mqtt_broker
+  port: !secret mqtt_port
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+
+  # Sparkplug B uses specific topic structure, disable ESPHome defaults
+  topic_prefix: null
+  discovery: false
+
+  # Disable default birth/will - we handle NBIRTH/NDEATH manually
+  # Note: NDEATH will be published on disconnect via on_disconnect
+  # The broker's keepalive timeout will detect disconnection
+
+  on_connect:
+    then:
+      - logger.log: "Connected to MQTT broker - Publishing Sparkplug B NBIRTH"
+      - if:
+          condition:
+            switch.is_on: prevent_sleep
+          then:
+            - lambda: |-
+                ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch");
+            # Publish NBIRTH and stay awake
+            - script.execute: spb_publish_nbirth
+          else:
+            - switch.turn_on: accessory_power
+            - delay: 5s
+            # Update all sensor components
+            - component.update: sen55
+            - component.update: sht3xd_sensor
+            - component.update: dallas_temp_probe
+            - component.update: sen5x_number_component
+            - component.update: max_17048
+            - delay: 3s
+            # Force update template sensors
+            - lambda: |-
+                id(pm0_3_to_0_5_number).publish_state(id(pm_0_5_number).state);
+                id(pm0_5_to_1_number).publish_state(std::max(0.0f, id(pm_1_0_number).state - id(pm_0_5_number).state));
+                id(pm1_to_2_5_number).publish_state(std::max(0.0f, id(pm_2_5_number).state - id(pm_1_0_number).state));
+                id(pm2_5_to_4_number).publish_state(std::max(0.0f, id(pm_4_0_number).state - id(pm_2_5_number).state));
+                id(pm4_to_10_number).publish_state(std::max(0.0f, id(pm_10_0_number).state - id(pm_4_0_number).state));
+
+                float total = id(pm_0_5_number).state +
+                              std::max(0.0f, id(pm_1_0_number).state - id(pm_0_5_number).state) +
+                              std::max(0.0f, id(pm_2_5_number).state - id(pm_1_0_number).state) +
+                              std::max(0.0f, id(pm_4_0_number).state - id(pm_2_5_number).state) +
+                              std::max(0.0f, id(pm_10_0_number).state - id(pm_4_0_number).state);
+                if (!std::isnan(total)) {
+                  id(total_pm_count).publish_state(total);
+                }
+            # Publish Sparkplug B NBIRTH (establishes all metrics)
+            - script.execute: spb_publish_nbirth
+            - delay: 1s
+            # Publish NDATA with current values
+            - script.execute: spb_publish_ndata
+            - delay: 2s
+            # Check alarm conditions
+            - lambda: |-
+                id(alarm_triggered_on_wake) = false;
+
+                if (id(alarm_outside_temp_range).state &&
+                    !std::isnan(id(sht_temperature).state) &&
+                    (id(sht_temperature).state > id(max_temp).state || id(sht_temperature).state < id(min_temp).state)) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "Temperature alarm triggered");
+                }
+
+                if (id(alarm_outside_humidity_range).state &&
+                    !std::isnan(id(sht_humidity).state) &&
+                    (id(sht_humidity).state > id(max_humidity).state || id(sht_humidity).state < id(min_humidity).state)) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "Humidity alarm triggered");
+                }
+
+                if (id(alarm_outside_total_pm_range).state &&
+                    !std::isnan(id(pm_10_0).state) &&
+                    id(pm_10_0).state >= id(max_total_pm).state) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "PM mass alarm triggered");
+                }
+
+                if (id(alarm_outside_total_pm_count_range).state &&
+                    !std::isnan(id(total_pm_count).state) &&
+                    id(total_pm_count).state >= id(max_total_pm_count).state) {
+                  id(alarm_triggered_on_wake) = true;
+                  ESP_LOGW("Apollo", "PM count alarm triggered");
+                }
+
+                if (id(alarm_triggered_on_wake)) {
+                  ESP_LOGW("Apollo", "Alarm Active - Staying Awake");
+                  id(deep_sleep_1).prevent_deep_sleep();
+                  id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
+                  id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
+                  id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;");
+                }
+            - if:
+                condition:
+                  and:
+                    - lambda: 'return !id(alarm_triggered_on_wake);'
+                    - switch.is_off: prevent_sleep
+                then:
+                  - deep_sleep.enter:
+                      id: deep_sleep_1
+
+  on_message:
+    # Sparkplug B NCMD - Node Command
+    # Uses wildcard to match any device - we filter by checking device name in handler
+    - topic: "spBv1.0/${spb_group_id}/NCMD/+"
+      then:
+        - lambda: |-
+            // Check if this NCMD is for us by parsing topic
+            ESP_LOGI("SparkplugB", "Received NCMD - command processing not yet implemented");
+            // TODO: Decode protobuf payload and handle commands
+
+    # Legacy command support (non-Sparkplug B) - uses substitution-based topics
+    - topic: "apollo/temp-pro-1/command/restart"
+      then:
+        - logger.log: "Restart command received via MQTT"
+        - button.press: esp_reboot
+
+    - topic: "apollo/temp-pro-1/command/prevent_sleep"
+      then:
+        - lambda: |-
+            if (x == "ON" || x == "on" || x == "1" || x == "true") {
+              id(prevent_sleep).turn_on();
+            } else {
+              id(prevent_sleep).turn_off();
+            }
+
+    - topic: "apollo/temp-pro-1/command/rebirth"
+      then:
+        - logger.log: "Rebirth requested - publishing new NBIRTH"
+        - lambda: |-
+            id(spb_birth_sent) = false;
+        - script.execute: spb_publish_nbirth
+
+script:
+  - id: statusCheck
+    then:
+      - if:
+          condition:
+            - mqtt.connected
+          then:
+            - logger.log: "Apollo Automation: Connected To MQTT (Sparkplug B)"
+            - light.turn_on:
+                id: rgb_light
+                brightness: 100%
+                red: 0%
+                green: 0%
+                blue: 100%
+          else:
+            - logger.log: "Apollo Automation: Not Connected To MQTT"
+            - light.turn_on:
+                id: rgb_light
+                brightness: 100%
+                red: 100%
+                green: 100%
+                blue: 0%
+      - delay: 5s
+      - light.turn_off: rgb_light
+
+button:
+  - platform: restart
+    icon: mdi:power-cycle
+    name: "ESP Reboot"
+    id: esp_reboot
+
+packages:
+  core: !include Core_SparkplugB.yaml
