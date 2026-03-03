@@ -13,7 +13,7 @@ esp32:
 external_components:
   - source:
       type: local
-      path: custom_components
+      path: components
   - source: github://ApolloAutomation/esphome-battery-component
     components: [max17048]
 
@@ -56,8 +56,8 @@ web_server:
 
 deep_sleep:
   id: deep_sleep_1
-  sleep_duration: 1h
-  run_duration: 90s
+  sleep_duration: 30min
+  run_duration: 30s
 
 one_wire:
   - platform: gpio
@@ -87,21 +87,36 @@ binary_sensor:
         pullup: true
     id: reset_button
     internal: true
-    on_press:
-      then:
-        - lambda: |-
-            id(button_press_timestamp) = millis();
-    on_release:
-      then:
-        - lambda: |-
-            if (millis() - id(button_press_timestamp) >= 10000) {
-              // Remove Wifi
+    on_multi_click:
+      # Triple click - toggle prevent sleep
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at most 0.5s
+          - ON for at most 0.5s
+          - OFF for at most 0.5s
+          - ON for at most 0.5s
+          - OFF for at least 0.3s
+        then:
+          - lambda: |-
+              if (id(prevent_sleep).state) {
+                id(prevent_sleep).turn_off();
+                ESP_LOGW("Apollo", "Prevent Sleep DISABLED via 3x button press");
+              } else {
+                id(prevent_sleep).turn_on();
+                ESP_LOGW("Apollo", "Prevent Sleep ENABLED via 3x button press");
+              }
+      # Long press (10s) - factory reset
+      - timing:
+          - ON for at least 10s
+        then:
+          - lambda: |-
               id(factory_reset_switch).turn_on();
-            }
-            else {
-              // StatusCheck
-              id(statusCheck).execute();
-            }
+      # Single click - status check
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at least 0.5s
+        then:
+          - script.execute: statusCheck
 
   - platform: template
     name: Alarm Temperature Within Range
@@ -340,21 +355,6 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
     internal: true
-    on_value:
-      then:
-        - mqtt.publish:
-            topic: apollo/temp-pro-1/sensor/pm_0_3_to_0_5
-            payload: !lambda |-
-              char buf[256];
-              auto time = id(sntp_time).now();
-              snprintf(buf, sizeof(buf),
-                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
-                (int)x,
-                id(device_mac_address).state.c_str(),
-                App.get_name().c_str(),
-                time.year, time.month, time.day_of_month,
-                time.hour, time.minute, time.second);
-              return std::string(buf);
 
   - platform: template
     name: "PM 0.5 To 1 µm Number"
@@ -366,21 +366,6 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
     internal: true
-    on_value:
-      then:
-        - mqtt.publish:
-            topic: apollo/temp-pro-1/sensor/pm_0_5_to_1
-            payload: !lambda |-
-              char buf[256];
-              auto time = id(sntp_time).now();
-              snprintf(buf, sizeof(buf),
-                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
-                (int)x,
-                id(device_mac_address).state.c_str(),
-                App.get_name().c_str(),
-                time.year, time.month, time.day_of_month,
-                time.hour, time.minute, time.second);
-              return std::string(buf);
 
   - platform: template
     name: "PM 1 To 2.5 µm Number"
@@ -392,21 +377,6 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
     internal: true
-    on_value:
-      then:
-        - mqtt.publish:
-            topic: apollo/temp-pro-1/sensor/pm_1_to_2_5
-            payload: !lambda |-
-              char buf[256];
-              auto time = id(sntp_time).now();
-              snprintf(buf, sizeof(buf),
-                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
-                (int)x,
-                id(device_mac_address).state.c_str(),
-                App.get_name().c_str(),
-                time.year, time.month, time.day_of_month,
-                time.hour, time.minute, time.second);
-              return std::string(buf);
 
   - platform: template
     name: "PM 2.5 To 4 µm Number"
@@ -418,21 +388,6 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
     internal: true
-    on_value:
-      then:
-        - mqtt.publish:
-            topic: apollo/temp-pro-1/sensor/pm_2_5_to_4
-            payload: !lambda |-
-              char buf[256];
-              auto time = id(sntp_time).now();
-              snprintf(buf, sizeof(buf),
-                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
-                (int)x,
-                id(device_mac_address).state.c_str(),
-                App.get_name().c_str(),
-                time.year, time.month, time.day_of_month,
-                time.hour, time.minute, time.second);
-              return std::string(buf);
 
   - platform: template
     name: "PM 4 To 10 µm Number"
@@ -444,21 +399,6 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
     internal: true
-    on_value:
-      then:
-        - mqtt.publish:
-            topic: apollo/temp-pro-1/sensor/pm_4_to_10
-            payload: !lambda |-
-              char buf[256];
-              auto time = id(sntp_time).now();
-              snprintf(buf, sizeof(buf),
-                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
-                (int)x,
-                id(device_mac_address).state.c_str(),
-                App.get_name().c_str(),
-                time.year, time.month, time.day_of_month,
-                time.hour, time.minute, time.second);
-              return std::string(buf);
 
   - platform: template
     name: "PM Total Count"
@@ -475,21 +415,6 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
     internal: true
-    on_value:
-      then:
-        - mqtt.publish:
-            topic: apollo/temp-pro-1/sensor/pm_total_count
-            payload: !lambda |-
-              char buf[256];
-              auto time = id(sntp_time).now();
-              snprintf(buf, sizeof(buf),
-                "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
-                (int)x,
-                id(device_mac_address).state.c_str(),
-                App.get_name().c_str(),
-                time.year, time.month, time.day_of_month,
-                time.hour, time.minute, time.second);
-              return std::string(buf);
 
   # Dallas Temperature Probe
   - platform: dallas_temp
@@ -513,21 +438,6 @@ sensor:
         - lambda: |
             if (x > 100) return 100;
             else return (x);
-      on_value:
-        then:
-          - mqtt.publish:
-              topic: apollo/temp-pro-1/sensor/battery_level
-              payload: !lambda |-
-                char buf[256];
-                auto time = id(sntp_time).now();
-                snprintf(buf, sizeof(buf),
-                  "{\"value\":%d,\"unit\":\"%%\",\"device_id\":\"%s\",\"device_name\":\"%s\",\"timestamp\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
-                  (int)x,
-                  id(device_mac_address).state.c_str(),
-                  App.get_name().c_str(),
-                  time.year, time.month, time.day_of_month,
-                  time.hour, time.minute, time.second);
-                return std::string(buf);
 
 light:
   - platform: esp32_rmt_led_strip
@@ -699,8 +609,8 @@ number:
     mode: box
     update_interval: never
     optimistic: true
-    restore_value: true
-    initial_value: 1
+    restore_value: false
+    initial_value: 0.5
     icon: "mdi:arrow-collapse-right"
     entity_category: CONFIG
     unit_of_measurement: "h"
@@ -755,7 +665,7 @@ switch:
     name: "Prevent Sleep"
     id: prevent_sleep
     icon: mdi:sleep
-    restore_mode: RESTORE_DEFAULT_ON
+    restore_mode: ALWAYS_ON
     optimistic: true
     entity_category: "config"
     internal: true
@@ -781,6 +691,16 @@ interval:
                 id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
                 id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
                 id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;");
+
+  # Publish MQTT data periodically when prevent_sleep is ON
+  - interval: 10s
+    startup_delay: 30s
+    then:
+      - if:
+          condition:
+            switch.is_on: prevent_sleep
+          then:
+            - script.execute: publish_mqtt_data
 
   # Temperature and humidity configurable intervals
   - interval: 10s
@@ -834,6 +754,68 @@ script:
             ESP_LOGW("Apollo", "Total PM Count is NaN, skipping publish");
           }
 
+  # Publish all MQTT data once (called from on_connect)
+  - id: publish_mqtt_data
+    then:
+      - lambda: |-
+          // Check if any PM sensor is NaN - skip this cycle if so
+          if (std::isnan(id(pm0_3_to_0_5_number).state) ||
+              std::isnan(id(pm0_5_to_1_number).state) ||
+              std::isnan(id(pm1_to_2_5_number).state) ||
+              std::isnan(id(pm2_5_to_4_number).state) ||
+              std::isnan(id(pm4_to_10_number).state)) {
+            ESP_LOGW("Apollo", "PM sensors not ready (NaN), skipping publish");
+            return;
+          }
+
+          const char* mac = id(device_mac_address).state.c_str();
+          const char* name = App.get_name().c_str();
+
+          int pm_vals[5] = {
+            (int)roundf(std::max(0.0f, id(pm0_3_to_0_5_number).state)),
+            (int)roundf(std::max(0.0f, id(pm0_5_to_1_number).state)),
+            (int)roundf(std::max(0.0f, id(pm1_to_2_5_number).state)),
+            (int)roundf(std::max(0.0f, id(pm2_5_to_4_number).state)),
+            (int)roundf(std::max(0.0f, id(pm4_to_10_number).state))
+          };
+          int total = pm_vals[0] + pm_vals[1] + pm_vals[2] + pm_vals[3] + pm_vals[4];
+
+          const char* topics[7] = {
+            "apollo/temp-pro-1/sensor/pm_0_3_to_0_5",
+            "apollo/temp-pro-1/sensor/pm_0_5_to_1",
+            "apollo/temp-pro-1/sensor/pm_1_to_2_5",
+            "apollo/temp-pro-1/sensor/pm_2_5_to_4",
+            "apollo/temp-pro-1/sensor/pm_4_to_10",
+            "apollo/temp-pro-1/sensor/pm_total_count",
+            "apollo/temp-pro-1/sensor/battery_level"
+          };
+
+          char buf[256];
+          for (int i = 0; i < 5; i++) {
+            snprintf(buf, sizeof(buf), "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", pm_vals[i], mac, name);
+            id(mqtt_client).publish(topics[i], buf, strlen(buf), 0, true);
+          }
+
+          snprintf(buf, sizeof(buf), "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", total, mac, name);
+          id(mqtt_client).publish(topics[5], buf, strlen(buf), 0, true);
+
+          int batt = std::isnan(id(batt_pct).state) ? -1 : (int)roundf(std::max(0.0f, id(batt_pct).state));
+          snprintf(buf, sizeof(buf), "{\"value\":%d,\"unit\":\"%%\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", batt, mac, name);
+          id(mqtt_client).publish(topics[6], buf, strlen(buf), 0, true);
+
+          // Publish IP address
+          const char* ip = id(device_ip_address).state.c_str();
+          snprintf(buf, sizeof(buf), "{\"value\":\"%s\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", ip, mac, name);
+          id(mqtt_client).publish("apollo/temp-pro-1/sensor/ip_address", buf, strlen(buf), 0, true);
+
+          ESP_LOGW("Apollo", "========================================");
+          ESP_LOGW("Apollo", "  IP Address: %s", ip);
+          ESP_LOGW("Apollo", "  Device ID:  %s", mac);
+          ESP_LOGW("Apollo", "  Device:     %s", name);
+          ESP_LOGW("Apollo", "  Battery:    %d%%", batt);
+          ESP_LOGW("Apollo", "========================================");
+          ESP_LOGI("Apollo", "All MQTT data published");
+
 text_sensor:
   - platform: template
     name: "OTA URL"
@@ -841,11 +823,17 @@ text_sensor:
     entity_category: "diagnostic"
     internal: true
 
-  - platform: wifi_info
-    mac_address:
-      name: "Device ID"
-      id: device_mac_address
-      internal: true
+  - platform: template
+    name: "Device ID"
+    id: device_mac_address
+    internal: true
+    lambda: |-
+      uint8_t mac[6];
+      esp_read_mac(mac, ESP_MAC_WIFI_STA);
+      char buf[18];
+      snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+      return std::string(buf);
 
   - platform: template
     name: "Device Name"
@@ -853,3 +841,16 @@ text_sensor:
     internal: true
     lambda: |-
       return App.get_name();
+
+  - platform: template
+    name: "IP Address"
+    id: device_ip_address
+    icon: mdi:ip-network
+    entity_category: "diagnostic"
+    lambda: |-
+      auto ips = esphome::network::get_ip_addresses();
+      if (ips.size() > 0 && ips[0].is_set()) {
+        return ips[0].str();
+      }
+      return std::string("No IP");
+    update_interval: 10s

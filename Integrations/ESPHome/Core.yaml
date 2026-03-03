@@ -37,7 +37,7 @@ esp32:
 external_components:
   - source:
       type: local
-      path: custom_components
+      path: components
   - source: github://ApolloAutomation/esphome-battery-component
     components: [max17048]
 
