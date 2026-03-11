@@ -105,6 +105,27 @@ binary_sensor:
                 id(prevent_sleep).turn_on();
                 ESP_LOGW("Apollo", "Prevent Sleep ENABLED via 3x button press");
               }
+          - if:
+              condition:
+                switch.is_on: prevent_sleep
+              then:
+                - light.turn_on:
+                    id: rgb_light
+                    brightness: 100%
+                    red: 100%
+                    green: 0%
+                    blue: 0%
+                - delay: 3s
+                - light.turn_off: rgb_light
+              else:
+                - light.turn_on:
+                    id: rgb_light
+                    brightness: 100%
+                    red: 0%
+                    green: 100%
+                    blue: 0%
+                - delay: 3s
+                - light.turn_off: rgb_light
       # Long press (10s) - factory reset
       - timing:
           - ON for at least 10s
@@ -758,12 +779,11 @@ script:
   - id: publish_mqtt_data
     then:
       - lambda: |-
-          // Check if any PM sensor is NaN - skip this cycle if so
-          if (std::isnan(id(pm0_3_to_0_5_number).state) ||
-              std::isnan(id(pm0_5_to_1_number).state) ||
-              std::isnan(id(pm1_to_2_5_number).state) ||
-              std::isnan(id(pm2_5_to_4_number).state) ||
-              std::isnan(id(pm4_to_10_number).state)) {
+          // Check if any PM mass sensor is NaN - skip this cycle if so
+          if (std::isnan(id(pm_1_0).state) ||
+              std::isnan(id(pm_2_5).state) ||
+              std::isnan(id(pm_4_0).state) ||
+              std::isnan(id(pm_10_0).state)) {
             ESP_LOGW("Apollo", "PM sensors not ready (NaN), skipping publish");
             return;
           }
@@ -771,48 +791,56 @@ script:
           const char* mac = id(device_mac_address).state.c_str();
           const char* name = App.get_name().c_str();
 
-          int pm_vals[5] = {
-            (int)roundf(std::max(0.0f, id(pm0_3_to_0_5_number).state)),
-            (int)roundf(std::max(0.0f, id(pm0_5_to_1_number).state)),
-            (int)roundf(std::max(0.0f, id(pm1_to_2_5_number).state)),
-            (int)roundf(std::max(0.0f, id(pm2_5_to_4_number).state)),
-            (int)roundf(std::max(0.0f, id(pm4_to_10_number).state))
-          };
-          int total = pm_vals[0] + pm_vals[1] + pm_vals[2] + pm_vals[3] + pm_vals[4];
+          // Build unique device suffix from last 6 chars of MAC (e.g. "352b94")
+          uint8_t raw_mac[6];
+          esp_read_mac(raw_mac, ESP_MAC_WIFI_STA);
+          char mac_suffix[7];
+          snprintf(mac_suffix, sizeof(mac_suffix), "%02x%02x%02x", raw_mac[3], raw_mac[4], raw_mac[5]);
 
-          const char* topics[7] = {
-            "apollo/temp-pro-1/sensor/pm_0_3_to_0_5",
-            "apollo/temp-pro-1/sensor/pm_0_5_to_1",
-            "apollo/temp-pro-1/sensor/pm_1_to_2_5",
-            "apollo/temp-pro-1/sensor/pm_2_5_to_4",
-            "apollo/temp-pro-1/sensor/pm_4_to_10",
-            "apollo/temp-pro-1/sensor/pm_total_count",
-            "apollo/temp-pro-1/sensor/battery_level"
+          // Mass concentration ranges in µg/m³
+          float pm_vals[4] = {
+            std::max(0.0f, id(pm_1_0).state),
+            std::max(0.0f, id(pm_2_5).state - id(pm_1_0).state),
+            std::max(0.0f, id(pm_4_0).state - id(pm_2_5).state),
+            std::max(0.0f, id(pm_10_0).state - id(pm_4_0).state)
           };
+          float total = std::max(0.0f, id(pm_10_0).state);
 
+          // Build dynamic topics with unique device ID
+          char topic[128];
           char buf[256];
-          for (int i = 0; i < 5; i++) {
-            snprintf(buf, sizeof(buf), "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", pm_vals[i], mac, name);
-            id(mqtt_client).publish(topics[i], buf, strlen(buf), 0, true);
+          const char* sensor_names[6] = {
+            "pm_0_3_to_1", "pm_1_to_2_5", "pm_2_5_to_4", "pm_4_to_10", "pm_total", "battery_level"
+          };
+
+          for (int i = 0; i < 4; i++) {
+            snprintf(topic, sizeof(topic), "apollo/temp-pro-1/%s/sensor/%s", mac_suffix, sensor_names[i]);
+            snprintf(buf, sizeof(buf), "{\"value\":%.1f,\"unit\":\"ug/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", pm_vals[i], mac, name);
+            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
           }
 
-          snprintf(buf, sizeof(buf), "{\"value\":%d,\"unit\":\"#/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", total, mac, name);
-          id(mqtt_client).publish(topics[5], buf, strlen(buf), 0, true);
+          snprintf(topic, sizeof(topic), "apollo/temp-pro-1/%s/sensor/%s", mac_suffix, sensor_names[4]);
+          snprintf(buf, sizeof(buf), "{\"value\":%.1f,\"unit\":\"ug/m3\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", total, mac, name);
+          id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
 
           int batt = std::isnan(id(batt_pct).state) ? -1 : (int)roundf(std::max(0.0f, id(batt_pct).state));
+          snprintf(topic, sizeof(topic), "apollo/temp-pro-1/%s/sensor/%s", mac_suffix, sensor_names[5]);
           snprintf(buf, sizeof(buf), "{\"value\":%d,\"unit\":\"%%\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", batt, mac, name);
-          id(mqtt_client).publish(topics[6], buf, strlen(buf), 0, true);
+          id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
 
           // Publish IP address
           const char* ip = id(device_ip_address).state.c_str();
+          snprintf(topic, sizeof(topic), "apollo/temp-pro-1/%s/sensor/ip_address", mac_suffix);
           snprintf(buf, sizeof(buf), "{\"value\":\"%s\",\"device_id\":\"%s\",\"device_name\":\"%s\"}", ip, mac, name);
-          id(mqtt_client).publish("apollo/temp-pro-1/sensor/ip_address", buf, strlen(buf), 0, true);
+          id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
 
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGW("Apollo", "  IP Address: %s", ip);
-          ESP_LOGW("Apollo", "  Device ID:  %s", mac);
+          ESP_LOGW("Apollo", "  Device ID:  %s (%s)", mac, mac_suffix);
           ESP_LOGW("Apollo", "  Device:     %s", name);
           ESP_LOGW("Apollo", "  Battery:    %d%%", batt);
+          ESP_LOGW("Apollo", "  PM 0.3-1: %.1f | 1-2.5: %.1f | 2.5-4: %.1f | 4-10: %.1f | Total: %.1f ug/m3",
+                   pm_vals[0], pm_vals[1], pm_vals[2], pm_vals[3], total);
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGI("Apollo", "All MQTT data published");
 
