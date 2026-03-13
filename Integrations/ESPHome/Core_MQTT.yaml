@@ -811,7 +811,7 @@ script:
           };
           float total = std::max(0.0f, id(pm_10_0).state);
 
-          // Publish sensor values - payload is just the raw value
+          // Publish sensor values - topic is the key, payload is the value
           char topic[128];
           char buf[32];
           const char* tags[6] = {
@@ -820,31 +820,31 @@ script:
           };
 
           for (int i = 0; i < 4; i++) {
-            snprintf(topic, sizeof(topic), "%s/sensor/%s/value", prefix, tags[i]);
+            snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[i]);
             snprintf(buf, sizeof(buf), "%.1f", pm_vals[i]);
             id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
           }
 
-          snprintf(topic, sizeof(topic), "%s/sensor/%s/value", prefix, tags[4]);
+          snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[4]);
           snprintf(buf, sizeof(buf), "%.1f", total);
           id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
 
           int batt = std::isnan(id(batt_pct).state) ? -1 : (int)roundf(std::max(0.0f, id(batt_pct).state));
-          snprintf(topic, sizeof(topic), "%s/sensor/%s/value", prefix, tags[5]);
+          snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[5]);
           snprintf(buf, sizeof(buf), "%d", batt);
           id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
 
-          // Publish IP address
+          // Publish metadata (retained)
           const char* ip = id(device_ip_address).state.c_str();
-          snprintf(topic, sizeof(topic), "%s/sensor/ip_address/value", prefix);
-          id(mqtt_client).publish(topic, ip, strlen(ip), 0, true);
 
-          // Publish metadata (retained, published once per connection)
           snprintf(topic, sizeof(topic), "%s/meta/device_id", prefix);
           id(mqtt_client).publish(topic, mac, strlen(mac), 0, true);
 
           snprintf(topic, sizeof(topic), "%s/meta/device_name", prefix);
           id(mqtt_client).publish(topic, name, strlen(name), 0, true);
+
+          snprintf(topic, sizeof(topic), "%s/meta/ip_address", prefix);
+          id(mqtt_client).publish(topic, ip, strlen(ip), 0, true);
 
           const char* unit_pm = "ug/m3";
           snprintf(topic, sizeof(topic), "%s/meta/unit_pm", prefix);
