@@ -8,6 +8,9 @@ esp32:
   flash_size: 8MB
   framework:
     type: esp-idf
+    sdkconfig_options:
+      # Disable Bluetooth to save power (not needed for MQTT over Ethernet)
+      CONFIG_BT_ENABLED: n
 
 # EXPERIMENTAL: Include custom component for SEN5x particle number concentration
 external_components:
@@ -39,16 +42,13 @@ globals:
     restore_value: no
     initial_value: '0'
 
+mdns:
+  disabled: true
+
 i2c:
   sda: GPIO16
   scl: GPIO17
   id: bus_a
-
-# Time component for UTC timestamps
-time:
-  - platform: sntp
-    id: sntp_time
-    timezone: UTC
 
 web_server:
   port: 80
@@ -178,7 +178,8 @@ binary_sensor:
               - lambda: |-
                   ESP_LOGW("Apollo", "Alarm cleared - going back to sleep");
                   id(deep_sleep_1).allow_deep_sleep();
-              - delay: 2s
+              - switch.turn_off: accessory_power
+              - delay: 100ms
               - deep_sleep.enter:
                   id: deep_sleep_1
 
@@ -236,19 +237,11 @@ sensor:
       id: pm_1_0
       internal: true
       accuracy_decimals: 1
-      filters:
-        - sliding_window_moving_average:
-            window_size: 9
-            send_every: 1
     pm_2_5:
       name: "PM <2.5µm Weight concentration"
       id: pm_2_5
       internal: true
       accuracy_decimals: 1
-      filters:
-        - sliding_window_moving_average:
-            window_size: 9
-            send_every: 1
     pm_4_0:
       name: "PM <4µm Weight concentration"
       id: pm_4_0
@@ -275,10 +268,6 @@ sensor:
         gating_max_duration_minutes: 180
         std_initial: 50
         gain_factor: 230
-      filters:
-        - sliding_window_moving_average:
-            window_size: 9
-            send_every: 1
     temperature_compensation:
       offset: 0
       normalized_offset_slope: 0
@@ -793,7 +782,7 @@ script:
 
           // Build unique device suffix from last 6 chars of MAC (e.g. "352b94")
           uint8_t raw_mac[6];
-          esp_read_mac(raw_mac, ESP_MAC_WIFI_STA);
+          esp_read_mac(raw_mac, ESP_MAC_BASE);
           char mac_suffix[7];
           snprintf(mac_suffix, sizeof(mac_suffix), "%02x%02x%02x", raw_mac[3], raw_mac[4], raw_mac[5]);
 
@@ -878,7 +867,7 @@ text_sensor:
     internal: true
     lambda: |-
       uint8_t mac[6];
-      esp_read_mac(mac, ESP_MAC_WIFI_STA);
+      esp_read_mac(mac, ESP_MAC_BASE);
       char buf[18];
       snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);

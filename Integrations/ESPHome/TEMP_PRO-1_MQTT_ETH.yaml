@@ -72,7 +72,7 @@ mqtt:
                 ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch");
           else:
             - switch.turn_on: accessory_power
-            - delay: 5s
+            - delay: 3s
             # Update all sensor components
             - component.update: sen55
             - component.update: sht3xd_sensor
@@ -95,7 +95,7 @@ mqtt:
             # Publish all MQTT data once
             - script.execute: publish_mqtt_data
             # Wait for MQTT messages to be sent
-            - delay: 2s
+            - delay: 1s
             - lambda: |-
                 // Check alarm conditions directly
                 id(alarm_triggered_on_wake) = false;
@@ -146,6 +146,10 @@ mqtt:
                     - lambda: 'return !id(alarm_triggered_on_wake);'
                     - switch.is_off: prevent_sleep
                 then:
+                  # Turn off accessory power before sleep to eliminate parasitic draw
+                  - switch.turn_off: accessory_power
+                  - light.turn_off: rgb_light
+                  - delay: 100ms
                   - deep_sleep.enter:
                       id: deep_sleep_1
 
