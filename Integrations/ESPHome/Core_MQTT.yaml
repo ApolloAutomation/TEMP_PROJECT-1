@@ -873,6 +873,10 @@ script:
           snprintf(topic, sizeof(topic), "%s/meta/unit_battery", prefix);
           id(mqtt_client).publish(topic, unit_batt, strlen(unit_batt), 0, true);
 
+          const char* sleep_mode = id(prevent_sleep).state ? "OFF" : "ON";
+          snprintf(topic, sizeof(topic), "%s/meta/sleep_mode", prefix);
+          id(mqtt_client).publish(topic, sleep_mode, strlen(sleep_mode), 0, true);
+
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGW("Apollo", "  IP Address:  %s", ip);
           ESP_LOGW("Apollo", "  Device ID:   %s (%s)", mac, mac_suffix);
