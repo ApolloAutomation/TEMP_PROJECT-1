@@ -49,7 +49,7 @@ esphome:
             }
             call.perform();
             ESP_LOGW("Apollo", "Battery: %.0f%% - %s", batt, batt >= 95 ? "GREEN (ready)" : batt >= 50 ? "YELLOW (charging)" : "RED (low)");
-        - delay: 5s
+        - delay: 2s
         - light.turn_off: rgb_light
 
 ota:
@@ -112,6 +112,8 @@ mqtt:
                            !std::isnan(id(batt_pct).state) &&
                            !id(device_mac_address).state.empty();
                 timeout: 20s
+            # Force IP address refresh before publishing
+            - component.update: device_ip_address
             # Publish all MQTT data once
             - script.execute: publish_mqtt_data
             # Wait for MQTT messages to be sent
@@ -169,7 +171,7 @@ mqtt:
                   # Turn off accessory power before sleep to eliminate parasitic draw
                   - switch.turn_off: accessory_power
                   - light.turn_off: rgb_light
-                  - delay: 100ms
+                  - delay: 500ms
                   - deep_sleep.enter:
                       id: deep_sleep_1
 

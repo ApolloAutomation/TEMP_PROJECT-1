@@ -11,6 +11,8 @@ esp32:
     sdkconfig_options:
       # Disable Bluetooth to save power (not needed for MQTT over Ethernet)
       CONFIG_BT_ENABLED: n
+      # Lower CPU frequency to save power (160MHz is sufficient for Ethernet + I2C)
+      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160: y
 
 # EXPERIMENTAL: Include custom component for SEN5x particle number concentration
 external_components:
@@ -179,7 +181,7 @@ binary_sensor:
                   ESP_LOGW("Apollo", "Alarm cleared - going back to sleep");
                   id(deep_sleep_1).allow_deep_sleep();
               - switch.turn_off: accessory_power
-              - delay: 100ms
+              - delay: 500ms
               - deep_sleep.enter:
                   id: deep_sleep_1
 
@@ -675,7 +677,7 @@ switch:
     name: "Prevent Sleep"
     id: prevent_sleep
     icon: mdi:sleep
-    restore_mode: ALWAYS_ON
+    restore_mode: ALWAYS_OFF
     optimistic: true
     entity_category: "config"
     internal: true
@@ -689,9 +691,10 @@ switch:
             id(deep_sleep_1).allow_deep_sleep();
 
 interval:
-  # Safety net: if prevent_sleep is OFF and device has been awake 30s+, force sleep
+  # Safety net: if prevent_sleep is OFF and device has been awake 60s+, force sleep
+  # 60s allows time for managed network switches (STP can delay link 30-45s)
   - interval: 5s
-    startup_delay: 30s
+    startup_delay: 60s
     then:
       - if:
           condition:
@@ -703,7 +706,7 @@ interval:
                 ESP_LOGW("Apollo", "Safety net: cutting power and entering sleep");
             - switch.turn_off: accessory_power
             - light.turn_off: rgb_light
-            - delay: 100ms
+            - delay: 500ms
             - deep_sleep.enter:
                 id: deep_sleep_1
 
@@ -955,7 +958,9 @@ text_sensor:
     lambda: |-
       auto ips = esphome::network::get_ip_addresses();
       if (ips.size() > 0 && ips[0].is_set()) {
-        return ips[0].str();
+        char buf[esphome::network::IP_ADDRESS_BUFFER_SIZE];
+        ips[0].str_to(buf);
+        return std::string(buf);
       }
       return std::string("No IP");
     update_interval: 10s
