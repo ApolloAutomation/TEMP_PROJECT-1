@@ -14,34 +14,19 @@ esp32:
       # Lower CPU frequency to save power (160MHz is sufficient for Ethernet + I2C)
       CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160: y
 
-# EXPERIMENTAL: Include custom component for SEN5x particle number concentration
 external_components:
-  - source:
-      type: local
-      path: components
   - source: github://ApolloAutomation/esphome-battery-component
     components: [max17048]
 
 globals:
-  - id: cycleCounter
-    type: int
-    restore_value: no
-    initial_value: '0'
-  - id: button_press_timestamp
-    restore_value: no
-    type: uint32_t
-    initial_value: '0'
   - id: alarm_triggered_on_wake
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: last_temp_update
+  # Boot/wake counter persisted across deep sleep (NVS)
+  - id: boot_count
     type: uint32_t
-    restore_value: no
-    initial_value: '0'
-  - id: last_humidity_update
-    type: uint32_t
-    restore_value: no
+    restore_value: true
     initial_value: '0'
 
 mdns:
@@ -59,11 +44,7 @@ web_server:
 
 deep_sleep:
   id: deep_sleep_1
-  sleep_duration: 30min
-
-one_wire:
-  - platform: gpio
-    pin: GPIO6
+  sleep_duration: 2min  # TESTING — revert to 30min for deployment
 
 # Buzzer
 output:
@@ -76,10 +57,6 @@ rtttl:
   output: buzzer
 
 binary_sensor:
-  - platform: status
-    name: Online
-    id: ink_ha_connected
-    internal: true
   - platform: gpio
     pin:
       number: GPIO0
@@ -141,97 +118,7 @@ binary_sensor:
         then:
           - script.execute: statusCheck
 
-  - platform: template
-    name: Alarm Temperature Within Range
-    id: temp_within_range
-    internal: true
-    lambda: 'return std::isnan(id(sht_temperature).state) || ((id(sht_temperature).state <= id(max_temp).state) && (id(sht_temperature).state >= id(min_temp).state));'
-
-  - platform: template
-    name: Alarm Humidity Within Range
-    id: humidity_within_range
-    internal: true
-    lambda: 'return std::isnan(id(sht_humidity).state) || ((id(sht_humidity).state <= id(max_humidity).state) && (id(sht_humidity).state >= id(min_humidity).state));'
-
-  - platform: template
-    name: Alarm Total PM Within Range
-    id: total_pm_within_range
-    internal: true
-    lambda: 'return std::isnan(id(pm_10_0).state) || (id(pm_10_0).state < id(max_total_pm).state);'
-
-  - platform: template
-    name: Alarm Total PM Count Within Range
-    id: total_pm_count_within_range
-    internal: true
-    lambda: 'return std::isnan(id(total_pm_count).state) || (id(total_pm_count).state < id(max_total_pm_count).state);'
-
-  - platform: template
-    name: Alarm Active
-    id: alarm_active
-    internal: true
-    lambda: 'return (id(alarm_outside_temp_range).state && !id(temp_within_range).state) || (id(alarm_outside_humidity_range).state && !id(humidity_within_range).state) || (id(alarm_outside_total_pm_range).state && !id(total_pm_within_range).state) || (id(alarm_outside_total_pm_count_range).state && !id(total_pm_count_within_range).state);'
-    on_release:
-      then:
-        - light.turn_off: rgb_light
-        - if:
-            condition:
-              switch.is_off: prevent_sleep
-            then:
-              - lambda: |-
-                  ESP_LOGW("Apollo", "Alarm cleared - going back to sleep");
-                  id(deep_sleep_1).allow_deep_sleep();
-              - switch.turn_off: accessory_power
-              - delay: 500ms
-              - deep_sleep.enter:
-                  id: deep_sleep_1
-
 sensor:
-  - platform: internal_temperature
-    name: "ESP Temperature"
-    id: sys_esp_temperature
-    internal: true
-
-  - platform: uptime
-    name: Uptime
-    id: sys_uptime
-    update_interval: 60s
-    internal: true
-
-  - platform: sht3xd
-    id: sht3xd_sensor
-    temperature:
-      name: "Temperature Raw"
-      id: sht_temperature_raw
-      internal: true
-    humidity:
-      name: "Relative Humidity Raw"
-      id: sht_humidity_raw
-      internal: true
-    update_interval: 10s
-
-  # Template sensors with configurable intervals
-  - platform: template
-    name: "Temperature"
-    id: sht_temperature
-    lambda: 'return id(sht_temperature_raw).state;'
-    unit_of_measurement: "°C"
-    device_class: temperature
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: never
-    internal: true
-
-  - platform: template
-    name: "Relative Humidity"
-    id: sht_humidity
-    lambda: 'return id(sht_humidity_raw).state;'
-    unit_of_measurement: "%"
-    device_class: humidity
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: never
-    internal: true
-
   - platform: sen5x
     id: sen55
     pm_1_0:
@@ -254,186 +141,10 @@ sensor:
       id: pm_10_0
       internal: true
       accuracy_decimals: 1
-    nox:
-      name: "NOX Index"
-      id: sen_nox
-      internal: true
-      accuracy_decimals: 1
-    voc:
-      name: "VOC Index"
-      id: sen_voc
-      internal: true
-      algorithm_tuning:
-        index_offset: 100
-        learning_time_offset_hours: 12
-        learning_time_gain_hours: 12
-        gating_max_duration_minutes: 180
-        std_initial: 50
-        gain_factor: 230
-    temperature_compensation:
-      offset: 0
-      normalized_offset_slope: 0
-      time_constant: 0
-    store_baseline: true
+    # VOC/NOx disabled — not published to MQTT and 30s wake window is too short
+    # for the learning algorithm to produce meaningful values
+    store_baseline: false
     update_interval: 10s
-
-  - platform: template
-    name: "PM 0.3 To 1 µm"
-    id: pm0_3_to_1
-    internal: true
-    lambda: return id(pm_1_0).state;
-    unit_of_measurement: "µg/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-
-  - platform: template
-    name: "PM 1 To 2.5 µm"
-    id: pm1_to_2_5
-    internal: true
-    lambda: return std::max(0.0f, id(pm_2_5).state - id(pm_1_0).state);
-    unit_of_measurement: "µg/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-
-  - platform: template
-    name: "PM 2.5 To 4 µm"
-    id: pm2_5_to_4
-    internal: true
-    lambda: return std::max(0.0f, id(pm_4_0).state - id(pm_2_5).state);
-    unit_of_measurement: "µg/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-
-  - platform: template
-    name: "PM 4 To 10 µm"
-    id: pm4_to_10
-    internal: true
-    lambda: return std::max(0.0f, id(pm_10_0).state - id(pm_4_0).state);
-    unit_of_measurement: "µg/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-
-  # EXPERIMENTAL: SEN5x Particle Number Concentration Sensors
-  # Uses undocumented I2C command 0x0413
-  # Reference: Sensirion_SEN5x_Read_Mass_and_Number_Concentrations.pdf
-  - platform: sen5x_number
-    id: sen5x_number_component
-    address: 0x69
-    update_interval: 10s
-    pm_0_5_number:
-      name: "PM <0.5µm Number concentration"
-      id: pm_0_5_number
-      accuracy_decimals: 0
-      internal: true
-    pm_1_0_number:
-      name: "PM <1µm Number concentration"
-      id: pm_1_0_number
-      accuracy_decimals: 0
-      internal: true
-    pm_2_5_number:
-      name: "PM <2.5µm Number concentration"
-      id: pm_2_5_number
-      accuracy_decimals: 0
-      internal: true
-    pm_4_0_number:
-      name: "PM <4µm Number concentration"
-      id: pm_4_0_number
-      accuracy_decimals: 0
-      internal: true
-    pm_10_0_number:
-      name: "PM <10µm Number concentration"
-      id: pm_10_0_number
-      accuracy_decimals: 0
-      internal: true
-    typical_particle_size:
-      name: "PM Typical Particle Size"
-      id: typical_particle_size
-      accuracy_decimals: 2
-      internal: true
-
-  # Particle number concentration ranges (EXPERIMENTAL)
-  # These are the main sensors published to MQTT
-  - platform: template
-    name: "PM 0.3 To 0.5 µm Number"
-    id: pm0_3_to_0_5_number
-    lambda: return id(pm_0_5_number).state;
-    unit_of_measurement: "#/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-    accuracy_decimals: 0
-    internal: true
-
-  - platform: template
-    name: "PM 0.5 To 1 µm Number"
-    id: pm0_5_to_1_number
-    lambda: return std::max(0.0f, id(pm_1_0_number).state - id(pm_0_5_number).state);
-    unit_of_measurement: "#/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-    accuracy_decimals: 0
-    internal: true
-
-  - platform: template
-    name: "PM 1 To 2.5 µm Number"
-    id: pm1_to_2_5_number
-    lambda: return std::max(0.0f, id(pm_2_5_number).state - id(pm_1_0_number).state);
-    unit_of_measurement: "#/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-    accuracy_decimals: 0
-    internal: true
-
-  - platform: template
-    name: "PM 2.5 To 4 µm Number"
-    id: pm2_5_to_4_number
-    lambda: return std::max(0.0f, id(pm_4_0_number).state - id(pm_2_5_number).state);
-    unit_of_measurement: "#/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-    accuracy_decimals: 0
-    internal: true
-
-  - platform: template
-    name: "PM 4 To 10 µm Number"
-    id: pm4_to_10_number
-    lambda: return std::max(0.0f, id(pm_10_0_number).state - id(pm_4_0_number).state);
-    unit_of_measurement: "#/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-    accuracy_decimals: 0
-    internal: true
-
-  - platform: template
-    name: "PM Total Count"
-    id: total_pm_count
-    lambda: |-
-      return id(pm0_3_to_0_5_number).state +
-             id(pm0_5_to_1_number).state +
-             id(pm1_to_2_5_number).state +
-             id(pm2_5_to_4_number).state +
-             id(pm4_to_10_number).state;
-    unit_of_measurement: "#/m³"
-    state_class: measurement
-    icon: mdi:air-filter
-    update_interval: 10s
-    accuracy_decimals: 0
-    internal: true
-
-  # Dallas Temperature Probe
-  - platform: dallas_temp
-    name: "Temperature Probe (Dallas)"
-    id: dallas_temp_probe
-    update_interval: 60s
-    internal: true
 
   # Battery monitoring
   - platform: max17048
@@ -475,162 +186,48 @@ light:
           min_brightness: 10%
           max_brightness: 25%
 
-button:
-  - platform: factory_reset
-    disabled_by_default: True
-    name: "Factory Reset ESP"
-    id: factory_reset_all
-    internal: true
-
 number:
+  # Warm-up delay before sampling SEN55 (seconds from boot).
+  # 20s default clears the fan spin-up transient. Tune per-site if needed.
   - platform: template
-    id: min_temp
-    name: Min Temperature
-    min_value: -60
-    max_value: 100
-    step: 0.1
-    unit_of_measurement: '°C'
-    initial_value: -20
-    optimistic: true
-    update_interval: never
-    mode: box
-    entity_category: config
-    internal: true
-
-  - platform: template
-    id: max_temp
-    name: Max Temperature
-    min_value: -60
-    max_value: 100
-    step: 0.1
-    unit_of_measurement: '°C'
-    initial_value: 200
-    optimistic: true
-    update_interval: never
-    mode: box
-    entity_category: config
-    internal: true
-
-  - platform: template
-    id: min_humidity
-    name: Min Humidity
+    name: "Warm-up Delay"
+    id: warmup_delay_s
     min_value: 0
-    max_value: 100
-    step: 0.1
-    unit_of_measurement: '%'
-    initial_value: 0
-    optimistic: true
-    update_interval: never
-    mode: box
-    entity_category: config
-    internal: true
-
-  - platform: template
-    id: max_humidity
-    name: Max Humidity
-    min_value: 0
-    max_value: 100
-    step: 0.1
-    unit_of_measurement: '%'
-    initial_value: 100
-    optimistic: true
-    update_interval: never
-    mode: box
-    entity_category: config
-    internal: true
-
-  # Configurable temperature and humidity intervals (in minutes)
-  - platform: template
-    id: temperature_update_interval
-    name: "Temperature Update Interval"
-    min_value: 1
-    max_value: 1000
+    max_value: 60
     step: 1
-    unit_of_measurement: 'm'
-    initial_value: 1
-    optimistic: true
-    restore_value: true
     mode: box
-    entity_category: config
-    internal: true
-    on_value:
-      then:
-        - lambda: |-
-            // Force immediate temperature update when interval changes
-            id(sht_temperature).publish_state(id(sht_temperature_raw).state);
-            id(last_temp_update) = millis();
-
-  - platform: template
-    id: humidity_update_interval
-    name: "Humidity Update Interval"
-    min_value: 1
-    max_value: 1000
-    step: 1
-    unit_of_measurement: 'm'
-    initial_value: 1
-    optimistic: true
-    restore_value: true
-    mode: box
-    entity_category: config
-    internal: true
-    on_value:
-      then:
-        - lambda: |-
-            // Force immediate humidity update when interval changes
-            id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-            id(last_humidity_update) = millis();
-
-  # Total PM min/max settings
-
-  - platform: template
-    id: max_total_pm
-    name: Max Total PM
-    min_value: 0
-    max_value: 500
-    step: 0.1
-    unit_of_measurement: 'µg/m³'
-    initial_value: 50
-    optimistic: true
     update_interval: never
-    mode: box
-    entity_category: config
-    internal: true
-
-  - platform: template
-    id: max_total_pm_count
-    name: Max Total PM Count
-    min_value: 0
-    max_value: 10000000000
-    step: 1000000
-    unit_of_measurement: '#/m³'
-    initial_value: 1000000000
     optimistic: true
     restore_value: true
-    update_interval: never
-    mode: box
-    entity_category: config
+    initial_value: 20
+    icon: "mdi:timer-sand"
+    entity_category: CONFIG
+    unit_of_measurement: "s"
     internal: true
 
-  # Deep sleep duration configuration
+  # Deep sleep duration in MINUTES — configurable via web server text box.
+  # restore_value: true persists web UI changes across reboots.
+  # TESTING: initial_value 2. For deployment, change to 30.
   - platform: template
     name: "Sleep Duration"
     id: deep_sleep_sleep_duration
-    min_value: 0.01
-    max_value: 24
-    step: 0.01
+    min_value: 1
+    max_value: 1440
+    step: 1
     mode: box
     update_interval: never
     optimistic: true
-    restore_value: false
-    initial_value: 0.5
+    restore_value: true
+    initial_value: 2
     icon: "mdi:arrow-collapse-right"
     entity_category: CONFIG
-    unit_of_measurement: "h"
+    unit_of_measurement: "min"
     internal: true
     on_value:
       then:
         - lambda: |-
-            id(deep_sleep_1).set_sleep_duration(x * 60 * 60 * 1000);
+            id(deep_sleep_1).set_sleep_duration(x * 60 * 1000);
+            ESP_LOGW("Apollo", "Sleep duration updated to %.0f min", x);
 
 switch:
   - platform: factory_reset
@@ -643,34 +240,6 @@ switch:
     id: accessory_power
     restore_mode: ALWAYS_ON
     setup_priority: 1100
-    internal: true
-
-  - platform: template
-    name: "Alarm Outside Temp Range"
-    id: alarm_outside_temp_range
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    internal: true
-
-  - platform: template
-    name: "Alarm Outside Humidity Range"
-    id: alarm_outside_humidity_range
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    internal: true
-
-  - platform: template
-    name: "Alarm Outside Total PM Range"
-    id: alarm_outside_total_pm_range
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    internal: true
-
-  - platform: template
-    name: "Alarm Outside Total PM Count Range"
-    id: alarm_outside_total_pm_count_range
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
     internal: true
 
   - platform: template
@@ -691,10 +260,11 @@ switch:
             id(deep_sleep_1).allow_deep_sleep();
 
 interval:
-  # Safety net: if prevent_sleep is OFF and device has been awake 60s+, force sleep
-  # 60s allows time for managed network switches (STP can delay link 30-45s)
+  # Safety net: if prevent_sleep is OFF and device has been awake 45s+, force sleep
+  # 45s is comfortable for healthy networks (typical link+DHCP+MQTT: ~10-15s).
+  # Bump to 60s if deploying on managed switches with slow STP (not RSTP).
   - interval: 5s
-    startup_delay: 60s
+    startup_delay: 45s
     then:
       - if:
           condition:
@@ -703,25 +273,12 @@ interval:
               - lambda: 'return !id(alarm_triggered_on_wake);'
           then:
             - lambda: |-
-                ESP_LOGW("Apollo", "Safety net: cutting power and entering sleep");
-            - switch.turn_off: accessory_power
-            - light.turn_off: rgb_light
-            - delay: 500ms
-            - deep_sleep.enter:
-                id: deep_sleep_1
-
-  - interval: 10s
-    startup_delay: 60s
-    then:
-      - if:
-          condition:
-            lambda: !lambda |-
-              return id(alarm_active).state;
-          then:
-            - lambda: !lambda |-
-                id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
-                id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
-                id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;");
+                ESP_LOGW("Apollo", "Safety net: MQTT never connected — logging sensor state before sleep");
+            # Run publish script so the diagnostic summary log fires even when MQTT is down.
+            # The queued publishes fail silently if disconnected — broker just won't receive them.
+            - script.execute: publish_mqtt_data
+            - delay: 200ms
+            - script.execute: prepare_and_sleep
 
   # Publish MQTT data periodically when prevent_sleep is ON
   - interval: 10s
@@ -733,58 +290,7 @@ interval:
           then:
             - script.execute: publish_mqtt_data
 
-  # Temperature and humidity configurable intervals
-  - interval: 10s
-    then:
-      - lambda: |-
-          // Temperature update check (min to milliseconds)
-          uint32_t temp_interval_ms = id(temperature_update_interval).state * 60 * 1000;
-          if (millis() - id(last_temp_update) >= temp_interval_ms) {
-            id(sht_temperature).publish_state(id(sht_temperature_raw).state);
-            id(last_temp_update) = millis();
-          }
-
-          // Humidity update check (min to milliseconds)
-          uint32_t humidity_interval_ms = id(humidity_update_interval).state * 60 * 1000;
-          if (millis() - id(last_humidity_update) >= humidity_interval_ms) {
-            id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-            id(last_humidity_update) = millis();
-          }
-
 script:
-  - id: reportAllValues
-    then:
-      - component.update: sen55
-      - component.update: sht3xd_sensor
-      - component.update: dallas_temp_probe
-      - component.update: sen5x_number_component
-      - component.update: max_17048
-      - delay: 2s
-      - lambda: |-
-          // Publish SHT temperature and humidity values
-          id(sht_temperature).publish_state(id(sht_temperature_raw).state);
-          id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-          id(last_temp_update) = millis();
-          id(last_humidity_update) = millis();
-
-          // Publish total PM count using raw sensor values directly
-          // pm_0_5_number = 0.3-0.5 range (cumulative <0.5)
-          // Ranges: 0.3-0.5, 0.5-1, 1-2.5, 2.5-4, 4-10
-          float pm_0_3_to_0_5 = id(pm_0_5_number).state;
-          float pm_0_5_to_1 = std::max(0.0f, id(pm_1_0_number).state - id(pm_0_5_number).state);
-          float pm_1_to_2_5 = std::max(0.0f, id(pm_2_5_number).state - id(pm_1_0_number).state);
-          float pm_2_5_to_4 = std::max(0.0f, id(pm_4_0_number).state - id(pm_2_5_number).state);
-          float pm_4_to_10 = std::max(0.0f, id(pm_10_0_number).state - id(pm_4_0_number).state);
-
-          float total_count = pm_0_3_to_0_5 + pm_0_5_to_1 + pm_1_to_2_5 + pm_2_5_to_4 + pm_4_to_10;
-
-          if (!std::isnan(total_count)) {
-            id(total_pm_count).publish_state(total_count);
-            ESP_LOGI("Apollo", "Total PM Count: %.0f", total_count);
-          } else {
-            ESP_LOGW("Apollo", "Total PM Count is NaN, skipping publish");
-          }
-
   # Publish all MQTT data once (called from on_connect)
   - id: publish_mqtt_data
     then:
@@ -880,17 +386,80 @@ script:
           snprintf(topic, sizeof(topic), "%s/meta/sleep_mode", prefix);
           id(mqtt_client).publish(topic, sleep_mode, strlen(sleep_mode), 0, true);
 
+          // --- Diagnostic metadata (firmware, counters, health) ---
+          const char* fw_ver = "${version}";
+          snprintf(topic, sizeof(topic), "%s/meta/firmware_version", prefix);
+          id(mqtt_client).publish(topic, fw_ver, strlen(fw_ver), 0, true);
+
+          char num_buf[24];
+          snprintf(num_buf, sizeof(num_buf), "%u", (unsigned)id(boot_count));
+          snprintf(topic, sizeof(topic), "%s/meta/boot_count", prefix);
+          id(mqtt_client).publish(topic, num_buf, strlen(num_buf), 0, true);
+
+          float wake_sec = millis() / 1000.0f;
+          snprintf(num_buf, sizeof(num_buf), "%.1f", wake_sec);
+          snprintf(topic, sizeof(topic), "%s/meta/wake_duration_s", prefix);
+          id(mqtt_client).publish(topic, num_buf, strlen(num_buf), 0, true);
+
+          float batt_v_val = id(batt_v).state;
+          if (!std::isnan(batt_v_val)) {
+            snprintf(num_buf, sizeof(num_buf), "%.3f", batt_v_val);
+            snprintf(topic, sizeof(topic), "%s/meta/battery_voltage", prefix);
+            id(mqtt_client).publish(topic, num_buf, strlen(num_buf), 0, true);
+          }
+
+          uint32_t free_heap_kb = esp_get_free_heap_size() / 1024;
+          snprintf(num_buf, sizeof(num_buf), "%u", (unsigned)free_heap_kb);
+          snprintf(topic, sizeof(topic), "%s/meta/free_heap_kb", prefix);
+          id(mqtt_client).publish(topic, num_buf, strlen(num_buf), 0, true);
+
+          const char* notes = id(deployment_notes).state.c_str();
+          snprintf(topic, sizeof(topic), "%s/meta/deployment_notes", prefix);
+          id(mqtt_client).publish(topic, notes, strlen(notes), 0, true);
+
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGW("Apollo", "  IP Address:  %s", ip);
           ESP_LOGW("Apollo", "  Device ID:   %s (%s)", mac, mac_suffix);
-          ESP_LOGW("Apollo", "  Column ID:  %s", device_suffix);
+          ESP_LOGW("Apollo", "  Column ID:   %s", device_suffix);
           ESP_LOGW("Apollo", "  Device:      %s", name);
-          ESP_LOGW("Apollo", "  Battery:     %d%%", batt);
+          ESP_LOGW("Apollo", "  Firmware:    %s", fw_ver);
+          ESP_LOGW("Apollo", "  Boot Count:  %u", (unsigned)id(boot_count));
+          ESP_LOGW("Apollo", "  Wake Time:   %.1f s", wake_sec);
+          if (!std::isnan(batt_v_val)) {
+            ESP_LOGW("Apollo", "  Battery:     %d%% (%.3f V)", batt, batt_v_val);
+          } else {
+            ESP_LOGW("Apollo", "  Battery:     %d%% (voltage N/A)", batt);
+          }
+          ESP_LOGW("Apollo", "  Free Heap:   %u KB", (unsigned)free_heap_kb);
+          if (id(deployment_notes).state.length() > 0) {
+            ESP_LOGW("Apollo", "  Notes:       %s", notes);
+          }
           ESP_LOGW("Apollo", "  PM 0.3-1: %.1f | 1-2.5: %.1f | 2.5-4: %.1f | 4-10: %.1f | Total: %.1f ug/m3",
                    pm_vals[0], pm_vals[1], pm_vals[2], pm_vals[3], total);
           ESP_LOGW("Apollo", "  Topics: %s/sensor/...", prefix);
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGI("Apollo", "All MQTT data published");
+
+  # Consolidated sleep entry — all sleep paths call this script
+  - id: prepare_and_sleep
+    then:
+      - lambda: |-
+          ESP_LOGW("Apollo", "Preparing for deep sleep (awake for %.1f s)...", millis() / 1000.0f);
+          // Stop SEN55 measurement before cutting power
+          id(sen55)->write_command((uint16_t)0x0104);
+      - delay: 50ms
+      - switch.turn_off: accessory_power
+      - light.turn_off: rgb_light
+      - rtttl.stop:
+          id: rtttl_buzzer
+      - delay: 500ms
+      - lambda: |-
+          // Hold GPIO7 LOW through deep sleep to keep accessory rail off
+          gpio_hold_en(GPIO_NUM_7);
+          gpio_deep_sleep_hold_en();
+          ESP_LOGW("Apollo", "GPIO7 hold enabled, entering deep sleep");
+      - deep_sleep.enter:
+          id: deep_sleep_1
 
 select:
   - platform: template
@@ -901,15 +470,334 @@ select:
     optimistic: true
     restore_value: true
     initial_option: "Not Set"
+    # Grid: 12 rows (A-M, no I) x 27 columns (left: 014-01 with 0-prefix, right: 1-13).
+    # Custom Column ID text input overrides this dropdown when non-empty.
     options:
       - "Not Set"
-      - "J8"
-      - "J08"
-      - "J05"
-      - "H08"
+      - "A014"
+      - "A013"
+      - "A012"
+      - "A011"
+      - "A010"
+      - "A09"
+      - "A08"
+      - "A07"
+      - "A06"
+      - "A05"
+      - "A04"
+      - "A03"
+      - "A02"
+      - "A01"
+      - "A1"
+      - "A2"
+      - "A3"
+      - "A4"
+      - "A5"
+      - "A6"
+      - "A7"
+      - "A8"
+      - "A9"
+      - "A10"
+      - "A11"
+      - "A12"
+      - "A13"
+      - "B014"
+      - "B013"
+      - "B012"
+      - "B011"
+      - "B010"
+      - "B09"
+      - "B08"
+      - "B07"
+      - "B06"
+      - "B05"
+      - "B04"
+      - "B03"
+      - "B02"
+      - "B01"
+      - "B1"
+      - "B2"
+      - "B3"
+      - "B4"
+      - "B5"
+      - "B6"
+      - "B7"
+      - "B8"
+      - "B9"
+      - "B10"
+      - "B11"
+      - "B12"
+      - "B13"
+      - "C014"
+      - "C013"
+      - "C012"
+      - "C011"
+      - "C010"
+      - "C09"
+      - "C08"
+      - "C07"
+      - "C06"
+      - "C05"
+      - "C04"
+      - "C03"
+      - "C02"
+      - "C01"
+      - "C1"
+      - "C2"
+      - "C3"
+      - "C4"
+      - "C5"
+      - "C6"
+      - "C7"
+      - "C8"
+      - "C9"
+      - "C10"
+      - "C11"
+      - "C12"
+      - "C13"
+      - "D014"
+      - "D013"
+      - "D012"
+      - "D011"
+      - "D010"
+      - "D09"
+      - "D08"
+      - "D07"
+      - "D06"
+      - "D05"
+      - "D04"
+      - "D03"
+      - "D02"
+      - "D01"
+      - "D1"
+      - "D2"
+      - "D3"
+      - "D4"
+      - "D5"
+      - "D6"
+      - "D7"
+      - "D8"
+      - "D9"
+      - "D10"
+      - "D11"
+      - "D12"
+      - "D13"
+      - "E014"
+      - "E013"
       - "E012"
-      - "J011"
+      - "E011"
+      - "E010"
+      - "E09"
+      - "E08"
+      - "E07"
+      - "E06"
+      - "E05"
+      - "E04"
+      - "E03"
+      - "E02"
+      - "E01"
+      - "E1"
+      - "E2"
+      - "E3"
+      - "E4"
+      - "E5"
+      - "E6"
+      - "E7"
+      - "E8"
+      - "E9"
+      - "E10"
+      - "E11"
+      - "E12"
+      - "E13"
+      - "F014"
+      - "F013"
+      - "F012"
+      - "F011"
+      - "F010"
+      - "F09"
+      - "F08"
+      - "F07"
+      - "F06"
+      - "F05"
+      - "F04"
+      - "F03"
+      - "F02"
+      - "F01"
+      - "F1"
+      - "F2"
+      - "F3"
+      - "F4"
+      - "F5"
+      - "F6"
+      - "F7"
+      - "F8"
+      - "F9"
+      - "F10"
+      - "F11"
+      - "F12"
+      - "F13"
+      - "G014"
+      - "G013"
+      - "G012"
+      - "G011"
+      - "G010"
+      - "G09"
+      - "G08"
+      - "G07"
+      - "G06"
+      - "G05"
+      - "G04"
+      - "G03"
+      - "G02"
+      - "G01"
+      - "G1"
+      - "G2"
+      - "G3"
+      - "G4"
+      - "G5"
+      - "G6"
+      - "G7"
+      - "G8"
+      - "G9"
+      - "G10"
+      - "G11"
+      - "G12"
+      - "G13"
+      - "H014"
+      - "H013"
+      - "H012"
+      - "H011"
+      - "H010"
+      - "H09"
+      - "H08"
+      - "H07"
+      - "H06"
       - "H05"
+      - "H04"
+      - "H03"
+      - "H02"
+      - "H01"
+      - "H1"
+      - "H2"
+      - "H3"
+      - "H4"
+      - "H5"
+      - "H6"
+      - "H7"
+      - "H8"
+      - "H9"
+      - "H10"
+      - "H11"
+      - "H12"
+      - "H13"
+      - "J014"
+      - "J013"
+      - "J012"
+      - "J011"
+      - "J010"
+      - "J09"
+      - "J08"
+      - "J07"
+      - "J06"
+      - "J05"
+      - "J04"
+      - "J03"
+      - "J02"
+      - "J01"
+      - "J1"
+      - "J2"
+      - "J3"
+      - "J4"
+      - "J5"
+      - "J6"
+      - "J7"
+      - "J8"
+      - "J9"
+      - "J10"
+      - "J11"
+      - "J12"
+      - "J13"
+      - "K014"
+      - "K013"
+      - "K012"
+      - "K011"
+      - "K010"
+      - "K09"
+      - "K08"
+      - "K07"
+      - "K06"
+      - "K05"
+      - "K04"
+      - "K03"
+      - "K02"
+      - "K01"
+      - "K1"
+      - "K2"
+      - "K3"
+      - "K4"
+      - "K5"
+      - "K6"
+      - "K7"
+      - "K8"
+      - "K9"
+      - "K10"
+      - "K11"
+      - "K12"
+      - "K13"
+      - "L014"
+      - "L013"
+      - "L012"
+      - "L011"
+      - "L010"
+      - "L09"
+      - "L08"
+      - "L07"
+      - "L06"
+      - "L05"
+      - "L04"
+      - "L03"
+      - "L02"
+      - "L01"
+      - "L1"
+      - "L2"
+      - "L3"
+      - "L4"
+      - "L5"
+      - "L6"
+      - "L7"
+      - "L8"
+      - "L9"
+      - "L10"
+      - "L11"
+      - "L12"
+      - "L13"
+      - "M014"
+      - "M013"
+      - "M012"
+      - "M011"
+      - "M010"
+      - "M09"
+      - "M08"
+      - "M07"
+      - "M06"
+      - "M05"
+      - "M04"
+      - "M03"
+      - "M02"
+      - "M01"
+      - "M1"
+      - "M2"
+      - "M3"
+      - "M4"
+      - "M5"
+      - "M6"
+      - "M7"
+      - "M8"
+      - "M9"
+      - "M10"
+      - "M11"
+      - "M12"
+      - "M13"
 
 text:
   - platform: template
@@ -924,12 +812,21 @@ text:
     max_length: 16
     mode: text
 
-text_sensor:
+  # Free-form deployment notes — published as MQTT metadata for identification.
+  # Useful for "installed by X on Y near Z" info that persists across reboots.
   - platform: template
-    name: "OTA URL"
-    id: ota_url
-    entity_category: "diagnostic"
-    internal: true
+    name: "Deployment Notes"
+    id: deployment_notes
+    icon: mdi:note-text
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 64
+    mode: text
+
+text_sensor:
 
   - platform: template
     name: "Device ID"
@@ -943,12 +840,6 @@ text_sensor:
                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
       return std::string(buf);
 
-  - platform: template
-    name: "Device Name"
-    id: device_name_sensor
-    internal: true
-    lambda: |-
-      return App.get_name();
 
   - platform: template
     name: "IP Address"

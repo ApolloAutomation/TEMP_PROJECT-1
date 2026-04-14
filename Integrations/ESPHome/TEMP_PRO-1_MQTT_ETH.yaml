@@ -13,11 +13,25 @@ esphome:
   min_version: 2025.2.0
 
   on_boot:
+    - priority: 1200
+      then:
+        - lambda: |-
+            // Release GPIO7 hold from deep sleep (no-op on first boot)
+            gpio_hold_dis(GPIO_NUM_7);
+            esp_reset_reason_t rr = esp_reset_reason();
+            const char *cause = (rr == ESP_RST_DEEPSLEEP) ? "deep sleep timer"
+                              : (rr == ESP_RST_POWERON)  ? "power-on"
+                              : (rr == ESP_RST_SW)       ? "software restart"
+                              : "other";
+            ESP_LOGW("Apollo", "Wake cause: %s — GPIO7 hold released", cause);
     - priority: -100
       then:
-        - delay: 2s
         - lambda: |-
-            id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 60 * 1000);
+            // Track wake count across deep sleep (persisted in NVS)
+            id(boot_count) += 1;
+            ESP_LOGW("Apollo", "Boot count: %u", (unsigned)id(boot_count));
+            // Sleep duration number is in MINUTES
+            id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 1000);
         - if:
             condition:
               switch.is_on: prevent_sleep
@@ -25,32 +39,31 @@ esphome:
               - lambda: |-
                   ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch On Boot");
                   id(deep_sleep_1).prevent_deep_sleep();
-        - lambda: |-
-            // Force initial updates on boot
-            id(sht_temperature).publish_state(id(sht_temperature_raw).state);
-            id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-            id(last_temp_update) = millis();
-            id(last_humidity_update) = millis();
-        # Battery level indicator on boot: red <50%, yellow 50-95%, green 95%+
+        # Battery sensor always updated (needed for MQTT publish)
         - component.update: max_17048
-        - delay: 500ms
-        - lambda: |-
-            float batt = id(batt_pct).state;
-            if (std::isnan(batt)) return;
-            auto call = id(rgb_light).turn_on();
-            call.set_brightness(0.25f);
-            call.set_transition_length(0);
-            if (batt >= 95.0f) {
-              call.set_rgb(0.0f, 1.0f, 0.0f);  // Green
-            } else if (batt >= 50.0f) {
-              call.set_rgb(1.0f, 1.0f, 0.0f);  // Yellow
-            } else {
-              call.set_rgb(1.0f, 0.0f, 0.0f);  // Red
-            }
-            call.perform();
-            ESP_LOGW("Apollo", "Battery: %.0f%% - %s", batt, batt >= 95 ? "GREEN (ready)" : batt >= 50 ? "YELLOW (charging)" : "RED (low)");
-        - delay: 2s
-        - light.turn_off: rgb_light
+        # Battery LED indicator only when someone is present (prevent_sleep ON)
+        - if:
+            condition:
+              switch.is_on: prevent_sleep
+            then:
+              - delay: 500ms
+              - lambda: |-
+                  float batt = id(batt_pct).state;
+                  if (std::isnan(batt)) return;
+                  auto call = id(rgb_light).turn_on();
+                  call.set_brightness(0.25f);
+                  call.set_transition_length(0);
+                  if (batt >= 95.0f) {
+                    call.set_rgb(0.0f, 1.0f, 0.0f);  // Green
+                  } else if (batt >= 50.0f) {
+                    call.set_rgb(1.0f, 1.0f, 0.0f);  // Yellow
+                  } else {
+                    call.set_rgb(1.0f, 0.0f, 0.0f);  // Red
+                  }
+                  call.perform();
+                  ESP_LOGW("Apollo", "Battery: %.0f%% - %s", batt, batt >= 95 ? "GREEN (ready)" : batt >= 50 ? "YELLOW (charging)" : "RED (low)");
+              - delay: 2s
+              - light.turn_off: rgb_light
 
 ota:
   - platform: esphome
@@ -91,89 +104,37 @@ mqtt:
             - lambda: |-
                 ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch");
           else:
-            - switch.turn_on: accessory_power
-            - delay: 3s
-            # Update all sensor components
+            # Wait for SEN55 to stabilize — duration configurable via "Warm-up Delay" number.
+            # Uses millis() so this self-adjusts: if MQTT took longer than warmup to connect, skip wait.
+            - wait_until:
+                condition:
+                  lambda: 'return millis() > (uint32_t)(id(warmup_delay_s).state * 1000);'
+                timeout: 60s
+            # Trigger stabilized sensor reads
             - component.update: sen55
-            - component.update: sht3xd_sensor
-            - component.update: dallas_temp_probe
-            - component.update: sen5x_number_component
             - component.update: max_17048
-            # Wait for all sensors and device name to be ready (up to 20s)
+            # Safety check: ensure reads returned valid (non-NaN) data
             - wait_until:
                 condition:
                   lambda: |-
-                    return !std::isnan(id(pm0_3_to_0_5_number).state) &&
-                           !std::isnan(id(pm0_5_to_1_number).state) &&
-                           !std::isnan(id(pm1_to_2_5_number).state) &&
-                           !std::isnan(id(pm2_5_to_4_number).state) &&
-                           !std::isnan(id(pm4_to_10_number).state) &&
-                           !std::isnan(id(total_pm_count).state) &&
+                    return !std::isnan(id(pm_1_0).state) &&
+                           !std::isnan(id(pm_2_5).state) &&
+                           !std::isnan(id(pm_4_0).state) &&
+                           !std::isnan(id(pm_10_0).state) &&
                            !std::isnan(id(batt_pct).state) &&
                            !id(device_mac_address).state.empty();
-                timeout: 20s
+                timeout: 10s
             # Force IP address refresh before publishing
             - component.update: device_ip_address
             # Publish all MQTT data once
             - script.execute: publish_mqtt_data
             # Wait for MQTT messages to be sent
             - delay: 1s
-            - lambda: |-
-                // Check alarm conditions directly
-                id(alarm_triggered_on_wake) = false;
-
-                // Check temperature alarm (only if value is valid)
-                if (id(alarm_outside_temp_range).state &&
-                    !std::isnan(id(sht_temperature).state) &&
-                    (id(sht_temperature).state > id(max_temp).state || id(sht_temperature).state < id(min_temp).state)) {
-                  id(alarm_triggered_on_wake) = true;
-                  ESP_LOGW("Apollo", "Temperature alarm triggered");
-                }
-
-                // Check humidity alarm (only if value is valid)
-                if (id(alarm_outside_humidity_range).state &&
-                    !std::isnan(id(sht_humidity).state) &&
-                    (id(sht_humidity).state > id(max_humidity).state || id(sht_humidity).state < id(min_humidity).state)) {
-                  id(alarm_triggered_on_wake) = true;
-                  ESP_LOGW("Apollo", "Humidity alarm triggered");
-                }
-
-                // Check PM mass alarm (only if value is valid)
-                if (id(alarm_outside_total_pm_range).state &&
-                    !std::isnan(id(pm_10_0).state) &&
-                    id(pm_10_0).state >= id(max_total_pm).state) {
-                  id(alarm_triggered_on_wake) = true;
-                  ESP_LOGW("Apollo", "PM mass alarm triggered");
-                }
-
-                // Check PM count alarm (only if value is valid)
-                if (id(alarm_outside_total_pm_count_range).state &&
-                    !std::isnan(id(total_pm_count).state) &&
-                    id(total_pm_count).state >= id(max_total_pm_count).state) {
-                  id(alarm_triggered_on_wake) = true;
-                  ESP_LOGW("Apollo", "PM count alarm triggered: %.0f >= %.0f", id(total_pm_count).state, id(max_total_pm_count).state);
-                }
-
-                if (id(alarm_triggered_on_wake)) {
-                  ESP_LOGW("Apollo", "Alarm Active - Staying Awake");
-                  id(deep_sleep_1).prevent_deep_sleep();
-                  // Trigger alarm sound and light
-                  id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
-                  id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
-                  id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;");
-                }
             - if:
                 condition:
-                  and:
-                    - lambda: 'return !id(alarm_triggered_on_wake);'
-                    - switch.is_off: prevent_sleep
+                  switch.is_off: prevent_sleep
                 then:
-                  # Turn off accessory power before sleep to eliminate parasitic draw
-                  - switch.turn_off: accessory_power
-                  - light.turn_off: rgb_light
-                  - delay: 500ms
-                  - deep_sleep.enter:
-                      id: deep_sleep_1
+                  - script.execute: prepare_and_sleep
 
   on_message:
     # Restart command
@@ -264,16 +225,16 @@ mqtt:
             call.perform();
             ESP_LOGI("Apollo", "Light effect set to: %s", effect.c_str());
 
-    # Sleep duration control - payload: hours (e.g., "1", "0.5", "2.5")
+    # Sleep duration control - payload: minutes (e.g., "30", "2", "60")
     - topic: apollo/temp-pro-1/command/sleep_duration
       then:
         - lambda: |-
-            float hours = atof(x.c_str());
-            if (hours >= 0.01 && hours <= 24) {
-              id(deep_sleep_sleep_duration).publish_state(hours);
-              ESP_LOGI("Apollo", "Sleep duration set to %.2f hours", hours);
+            float minutes = atof(x.c_str());
+            if (minutes >= 1 && minutes <= 1440) {
+              id(deep_sleep_sleep_duration).publish_state(minutes);
+              ESP_LOGI("Apollo", "Sleep duration set to %.0f minutes", minutes);
             } else {
-              ESP_LOGW("Apollo", "Invalid sleep duration: %.2f (must be 0.01-24 hours)", hours);
+              ESP_LOGW("Apollo", "Invalid sleep duration: %.2f (must be 1-1440 minutes)", minutes);
             }
 
     # Buzzer test - payload: RTTTL string or preset name (beep, siren, success, error)
@@ -349,6 +310,29 @@ button:
     icon: mdi:power-cycle
     name: "ESP Reboot"
     id: esp_reboot
+
+  # Diagnostic: force an MQTT publish now without waiting for the next wake cycle.
+  # Useful for remote verification that the device is healthy and producing data.
+  - platform: template
+    name: "Publish Now"
+    id: button_publish_now
+    icon: mdi:upload
+    entity_category: "diagnostic"
+    on_press:
+      - lambda: 'ESP_LOGW("Apollo", "Publish Now triggered via web UI");'
+      - script.execute: publish_mqtt_data
+
+  # Diagnostic: end the current wake session immediately and enter deep sleep.
+  # Works whether prevent_sleep is ON or OFF.
+  - platform: template
+    name: "Force Sleep"
+    id: button_force_sleep
+    icon: mdi:power-sleep
+    entity_category: "diagnostic"
+    on_press:
+      - lambda: 'ESP_LOGW("Apollo", "Force Sleep triggered via web UI");'
+      - switch.turn_off: prevent_sleep
+      - script.execute: prepare_and_sleep
 
 packages:
   core: !include Core_MQTT.yaml
