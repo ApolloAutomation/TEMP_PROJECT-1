@@ -12,18 +12,100 @@ esphome:
 
   min_version: 2025.2.0
 
+  # Runs after ESPHome's teardown pass (which gracefully shuts down the W5500
+  # ethernet PHY while it still has power). Only then do we cut the accessory
+  # rail via GPIO7 and lock it LOW for deep sleep. This avoids the watchdog hang
+  # that occurred when W5500 lost power mid-teardown.
+  on_shutdown:
+    - priority: 300  # > ethernet's 250, so this runs after ethernet has torn down
+      then:
+        - lambda: |-
+            gpio_set_direction(GPIO_NUM_7, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_7, 0);
+            gpio_hold_en(GPIO_NUM_7);
+            gpio_deep_sleep_hold_en();
+            ESP_LOGW("Apollo", "on_shutdown: accessory power OFF, GPIO7 held LOW");
+
   on_boot:
     - priority: 1200
       then:
         - lambda: |-
             // Release GPIO7 hold from deep sleep (no-op on first boot)
             gpio_hold_dis(GPIO_NUM_7);
-            esp_reset_reason_t rr = esp_reset_reason();
-            const char *cause = (rr == ESP_RST_DEEPSLEEP) ? "deep sleep timer"
-                              : (rr == ESP_RST_POWERON)  ? "power-on"
-                              : (rr == ESP_RST_SW)       ? "software restart"
-                              : "other";
+            // Distinguish timer wake vs button-press wake vs fresh boot
+            esp_sleep_wakeup_cause_t wc = esp_sleep_get_wakeup_cause();
+            const char *cause;
+            if (wc == ESP_SLEEP_WAKEUP_TIMER) {
+              cause = "deep sleep timer";
+            } else if (wc == ESP_SLEEP_WAKEUP_EXT0) {
+              cause = "button press";
+            } else {
+              esp_reset_reason_t rr = esp_reset_reason();
+              if (rr == ESP_RST_POWERON)      cause = "power-on";
+              else if (rr == ESP_RST_SW)      cause = "software restart";
+              else if (rr == ESP_RST_DEEPSLEEP) cause = "deep sleep (unknown source)";
+              else                             cause = "other";
+            }
             ESP_LOGW("Apollo", "Wake cause: %s — GPIO7 hold released", cause);
+    # After ethernet netif is created (priority ~250) but before app loop (priority -100),
+    # apply static IP if the user has enabled it via the web UI.
+    - priority: 200
+      then:
+        - if:
+            condition:
+              and:
+                - switch.is_on: use_static_ip
+                - lambda: 'return !id(static_ip).state.empty() && !id(static_gateway).state.empty();'
+            then:
+              - lambda: |-
+                  esp_netif_t *netif = esp_netif_get_handle_from_ifkey("ETH_DEF");
+                  if (!netif) {
+                    ESP_LOGW("Apollo", "Static IP: ethernet netif not found yet, skipping");
+                    return;
+                  }
+
+                  esp_netif_ip_info_t ip_info = {};
+                  ip_info.ip.addr      = ipaddr_addr(id(static_ip).state.c_str());
+                  ip_info.gw.addr      = ipaddr_addr(id(static_gateway).state.c_str());
+                  ip_info.netmask.addr = ipaddr_addr(id(static_subnet).state.c_str());
+
+                  if (ip_info.ip.addr == IPADDR_NONE || ip_info.gw.addr == IPADDR_NONE ||
+                      ip_info.netmask.addr == IPADDR_NONE) {
+                    ESP_LOGW("Apollo", "Static IP: invalid address format, falling back to DHCP");
+                    return;
+                  }
+
+                  // Stop DHCP client (may already be running). Safe to fail.
+                  esp_netif_dhcpc_stop(netif);
+
+                  esp_err_t err = esp_netif_set_ip_info(netif, &ip_info);
+                  if (err != ESP_OK) {
+                    ESP_LOGW("Apollo", "Static IP set_ip_info failed: %s", esp_err_to_name(err));
+                    return;
+                  }
+
+                  // Optional: DNS servers
+                  if (!id(static_dns1).state.empty()) {
+                    esp_netif_dns_info_t dns = {};
+                    dns.ip.type = ESP_IPADDR_TYPE_V4;
+                    dns.ip.u_addr.ip4.addr = ipaddr_addr(id(static_dns1).state.c_str());
+                    if (dns.ip.u_addr.ip4.addr != IPADDR_NONE) {
+                      esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns);
+                    }
+                  }
+                  if (!id(static_dns2).state.empty()) {
+                    esp_netif_dns_info_t dns = {};
+                    dns.ip.type = ESP_IPADDR_TYPE_V4;
+                    dns.ip.u_addr.ip4.addr = ipaddr_addr(id(static_dns2).state.c_str());
+                    if (dns.ip.u_addr.ip4.addr != IPADDR_NONE) {
+                      esp_netif_set_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dns);
+                    }
+                  }
+
+                  ESP_LOGW("Apollo", "Static IP applied: %s / gw %s / mask %s",
+                           id(static_ip).state.c_str(),
+                           id(static_gateway).state.c_str(),
+                           id(static_subnet).state.c_str());
     - priority: -100
       then:
         - lambda: |-
@@ -41,10 +123,15 @@ esphome:
                   id(deep_sleep_1).prevent_deep_sleep();
         # Battery sensor always updated (needed for MQTT publish)
         - component.update: max_17048
-        # Battery LED indicator only when someone is present (prevent_sleep ON)
+        # Read SEN55 serial + firmware once per wake (cached in globals for MQTT/log)
+        - script.execute: read_sen55_info
+        # Battery LED indicator — shown when either "Prevent Sleep" or
+        # "Battery LED on Wake" is ON. Default is silent (both off) to save battery.
         - if:
             condition:
-              switch.is_on: prevent_sleep
+              or:
+                - switch.is_on: prevent_sleep
+                - switch.is_on: battery_led_on_wake
             then:
               - delay: 500ms
               - lambda: |-
@@ -66,8 +153,12 @@ esphome:
               - light.turn_off: rgb_light
 
 ota:
+  # CLI push: `esphome upload TEMP_PRO-1_MQTT_ETH.yaml` over network
   - platform: esphome
     id: ota_esphome
+  # Web UI firmware upload: access via device's web server (drag-and-drop .bin file).
+  # No USB needed. Safe_mode below handles rollback if new firmware crashes.
+  - platform: web_server
 
 safe_mode:
 
@@ -280,6 +371,63 @@ mqtt:
         - rtttl.stop:
             id: rtttl_buzzer
 
+    # Deployment Notes - any free-form string
+    - topic: apollo/temp-pro-1/command/deployment_notes
+      then:
+        - lambda: |-
+            auto call = id(deployment_notes).make_call();
+            call.set_value(x.c_str());
+            call.perform();
+            ESP_LOGI("Apollo", "Deployment notes set via MQTT: %s", x.c_str());
+
+    # Warm-up Delay in seconds (0-60)
+    - topic: apollo/temp-pro-1/command/warmup_delay
+      then:
+        - lambda: |-
+            float v = atof(x.c_str());
+            if (v >= 0 && v <= 60) {
+              id(warmup_delay_s).publish_state(v);
+              ESP_LOGI("Apollo", "Warm-up delay set to %.0f s", v);
+            } else {
+              ESP_LOGW("Apollo", "Invalid warmup_delay: %.2f (must be 0-60 s)", v);
+            }
+
+    # Max Wake Time in seconds (30-180)
+    - topic: apollo/temp-pro-1/command/max_wake_time
+      then:
+        - lambda: |-
+            float v = atof(x.c_str());
+            if (v >= 30 && v <= 180) {
+              id(max_wake_time_s).publish_state(v);
+              ESP_LOGI("Apollo", "Max wake time set to %.0f s", v);
+            } else {
+              ESP_LOGW("Apollo", "Invalid max_wake_time: %.2f (must be 30-180 s)", v);
+            }
+
+    # Battery LED on Wake toggle - "ON"/"OFF"
+    - topic: apollo/temp-pro-1/command/battery_led_on_wake
+      then:
+        - lambda: |-
+            if (x == "ON" || x == "on" || x == "1" || x == "true") {
+              id(battery_led_on_wake).turn_on();
+              ESP_LOGI("Apollo", "Battery LED on Wake: ON");
+            } else {
+              id(battery_led_on_wake).turn_off();
+              ESP_LOGI("Apollo", "Battery LED on Wake: OFF");
+            }
+
+    # Publish Interval in seconds (1-3600) — applies when prevent_sleep is ON
+    - topic: apollo/temp-pro-1/command/publish_interval
+      then:
+        - lambda: |-
+            float v = atof(x.c_str());
+            if (v >= 1 && v <= 3600) {
+              id(prevent_sleep_publish_interval_s).publish_state(v);
+              ESP_LOGI("Apollo", "Publish interval set to %.0f s", v);
+            } else {
+              ESP_LOGW("Apollo", "Invalid publish_interval: %.2f (must be 1-3600 s)", v);
+            }
+
 script:
   - id: statusCheck
     then:
@@ -333,6 +481,86 @@ button:
       - lambda: 'ESP_LOGW("Apollo", "Force Sleep triggered via web UI");'
       - switch.turn_off: prevent_sleep
       - script.execute: prepare_and_sleep
+
+  # Maintenance: trigger SEN55 forced fan cleaning (~10s of fan boost to clear dust).
+  # Recommended monthly/yearly depending on environment. Safe to run anytime.
+  - platform: template
+    name: "Clean SEN55 Fan"
+    id: button_clean_sen55
+    icon: mdi:fan-clock
+    entity_category: "diagnostic"
+    on_press:
+      - lambda: |-
+          ESP_LOGW("Apollo", "SEN55 fan cleaning triggered via web UI (~10s boost)");
+          id(sen55)->write_command((uint16_t)0x5607);
+
+  # Buzzer test — plays a short success melody to verify hardware works during install.
+  - platform: template
+    name: "Test Buzzer"
+    id: button_test_buzzer
+    icon: mdi:volume-high
+    entity_category: "diagnostic"
+    on_press:
+      - lambda: 'ESP_LOGW("Apollo", "Buzzer test triggered via web UI");'
+      - rtttl.play:
+          rtttl: "success:d=4,o=5,b=100:c,e,g"
+
+  # Stop any currently playing buzzer tone.
+  - platform: template
+    name: "Stop Buzzer"
+    id: button_stop_buzzer
+    icon: mdi:volume-off
+    entity_category: "diagnostic"
+    on_press:
+      - rtttl.stop:
+          id: rtttl_buzzer
+
+  # Recover a wedged SEN55 without rebooting the device.
+  # Sends stop + start measurement I2C commands.
+  - platform: template
+    name: "Restart SEN55"
+    id: button_restart_sen55
+    icon: mdi:restart
+    entity_category: "diagnostic"
+    on_press:
+      - lambda: |-
+          ESP_LOGW("Apollo", "Restarting SEN55 measurement");
+          id(sen55)->write_command((uint16_t)0x0104);  // stop
+      - delay: 50ms
+      - lambda: |-
+          id(sen55)->write_command((uint16_t)0x0021);  // start
+          ESP_LOGW("Apollo", "SEN55 restart complete");
+
+  # Cycle R/G/B on the LED strip to verify hardware during install.
+  - platform: template
+    name: "Test LED"
+    id: button_test_led
+    icon: mdi:led-variant-outline
+    entity_category: "diagnostic"
+    on_press:
+      - lambda: 'ESP_LOGW("Apollo", "LED test triggered via web UI");'
+      - light.turn_on:
+          id: rgb_light
+          brightness: 25%
+          red: 100%
+          green: 0%
+          blue: 0%
+      - delay: 1s
+      - light.turn_on:
+          id: rgb_light
+          brightness: 25%
+          red: 0%
+          green: 100%
+          blue: 0%
+      - delay: 1s
+      - light.turn_on:
+          id: rgb_light
+          brightness: 25%
+          red: 0%
+          green: 0%
+          blue: 100%
+      - delay: 1s
+      - light.turn_off: rgb_light
 
 packages:
   core: !include Core_MQTT.yaml

@@ -28,9 +28,24 @@ globals:
     type: uint32_t
     restore_value: true
     initial_value: '0'
+  # SEN55 hardware identification (populated once on first boot)
+  - id: sen55_serial
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: sen55_fw
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  # Timestamp of last publish during prevent_sleep mode (for configurable interval)
+  - id: last_prevent_sleep_publish_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
 
+# mDNS lets field techs reach the device at http://apollo-tmp-pro-1-mqtte-<mac6>.local/
+# Only active while the device is awake; no impact on deep sleep power.
 mdns:
-  disabled: true
 
 i2c:
   sda: GPIO16
@@ -40,11 +55,27 @@ i2c:
 web_server:
   port: 80
   version: 3
-  include_internal: true
+  # Hide internal-only entities (e.g. SEN55 cumulative mass values) from the UI.
+  # Entities we want visible have `internal: true` removed.
+  include_internal: false
+  # HTTP basic auth — for deployment, move password to !secret.
+  auth:
+    username: admin
+    password: tmna
 
 deep_sleep:
   id: deep_sleep_1
   sleep_duration: 2min  # TESTING — revert to 30min for deployment
+  # Wake on button press (GPIO0 grounded). Adds ~5µA during sleep (negligible).
+  # INVERT_WAKEUP handles the edge case of button held at sleep entry.
+  wakeup_pin:
+    number: GPIO0
+    inverted: true
+    allow_other_uses: true
+    mode:
+      input: true
+      pullup: true
+  wakeup_pin_mode: INVERT_WAKEUP
 
 # Buzzer
 output:
@@ -61,6 +92,7 @@ binary_sensor:
     pin:
       number: GPIO0
       inverted: true
+      allow_other_uses: true  # shared with deep_sleep wakeup_pin
       mode:
         input: true
         pullup: true
@@ -146,17 +178,88 @@ sensor:
     store_baseline: false
     update_interval: 10s
 
+  # PM mass concentration ranges (what's actually in each size bucket).
+  # SEN55 reports cumulative values (<1µm includes all smaller); we subtract
+  # to get per-bucket values.
+  - platform: template
+    name: "PM 0.3 to 1 µm"
+    lambda: |-
+      if (std::isnan(id(pm_1_0).state)) return NAN;
+      return std::max(0.0f, id(pm_1_0).state);
+    unit_of_measurement: "µg/m³"
+    device_class: pm1
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:air-filter
+    update_interval: 10s
+
+  - platform: template
+    name: "PM 1 to 2.5 µm"
+    lambda: |-
+      if (std::isnan(id(pm_1_0).state) || std::isnan(id(pm_2_5).state)) return NAN;
+      return std::max(0.0f, id(pm_2_5).state - id(pm_1_0).state);
+    unit_of_measurement: "µg/m³"
+    device_class: pm25
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:air-filter
+    update_interval: 10s
+
+  - platform: template
+    name: "PM 2.5 to 4 µm"
+    lambda: |-
+      if (std::isnan(id(pm_2_5).state) || std::isnan(id(pm_4_0).state)) return NAN;
+      return std::max(0.0f, id(pm_4_0).state - id(pm_2_5).state);
+    unit_of_measurement: "µg/m³"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:air-filter
+    update_interval: 10s
+
+  - platform: template
+    name: "PM 4 to 10 µm"
+    lambda: |-
+      if (std::isnan(id(pm_4_0).state) || std::isnan(id(pm_10_0).state)) return NAN;
+      return std::max(0.0f, id(pm_10_0).state - id(pm_4_0).state);
+    unit_of_measurement: "µg/m³"
+    device_class: pm10
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:air-filter
+    update_interval: 10s
+
+  # Total PM mass (cumulative <10 µm — same as raw SEN55 pm_10_0).
+  - platform: template
+    name: "PM Total"
+    lambda: |-
+      if (std::isnan(id(pm_10_0).state)) return NAN;
+      return std::max(0.0f, id(pm_10_0).state);
+    unit_of_measurement: "µg/m³"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:air-filter
+    update_interval: 10s
+
+  # ESP32 internal die temperature — health indicator for thermal issues.
+  # Converted from the sensor's native °C to °F.
+  - platform: internal_temperature
+    name: "ESP Temperature"
+    id: esp_internal_temp
+    update_interval: 60s
+    entity_category: "diagnostic"
+    unit_of_measurement: "°F"
+    filters:
+      - lambda: 'return x * 9.0 / 5.0 + 32.0;'
+
   # Battery monitoring
   - platform: max17048
     id: max_17048
     battery_voltage:
       name: Battery voltage
       id: batt_v
-      internal: true
     battery_level:
       name: Battery level
       id: batt_pct
-      internal: true
       filters:
         - lambda: |
             if (x > 100) return 100;
@@ -171,7 +274,7 @@ light:
     chipset: WS2812
     num_leds: 4
     rgb_order: grb
-    internal: true
+    entity_category: "diagnostic"
     effects:
       - pulse:
           name: "Slow Pulse"
@@ -187,6 +290,40 @@ light:
           max_brightness: 25%
 
 number:
+  # Max wake time before safety-net forces sleep (seconds from boot).
+  # 45s default is comfortable for healthy networks. Bump higher for slow STP or flaky DNS.
+  - platform: template
+    name: "Max Wake Time"
+    id: max_wake_time_s
+    min_value: 30
+    max_value: 180
+    step: 1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 45
+    icon: "mdi:timer-alert"
+    entity_category: CONFIG
+    unit_of_measurement: "s"
+
+  # How often to publish MQTT data while Prevent Sleep is ON.
+  # Default 10s. Increase for reduced chatter or decrease for faster live debugging.
+  - platform: template
+    name: "Publish Interval"
+    id: prevent_sleep_publish_interval_s
+    min_value: 1
+    max_value: 3600
+    step: 1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    icon: mdi:timer-outline
+    entity_category: CONFIG
+    unit_of_measurement: "s"
+
   # Warm-up delay before sampling SEN55 (seconds from boot).
   # 20s default clears the fan spin-up transient. Tune per-site if needed.
   - platform: template
@@ -203,7 +340,6 @@ number:
     icon: "mdi:timer-sand"
     entity_category: CONFIG
     unit_of_measurement: "s"
-    internal: true
 
   # Deep sleep duration in MINUTES — configurable via web server text box.
   # restore_value: true persists web UI changes across reboots.
@@ -222,7 +358,6 @@ number:
     icon: "mdi:arrow-collapse-right"
     entity_category: CONFIG
     unit_of_measurement: "min"
-    internal: true
     on_value:
       then:
         - lambda: |-
@@ -240,7 +375,32 @@ switch:
     id: accessory_power
     restore_mode: ALWAYS_ON
     setup_priority: 1100
-    internal: true
+    entity_category: "diagnostic"
+
+  # Show battery level LED on every wake (even unattended cycles).
+  # Default OFF to save battery; turn ON as an always-on indicator for techs.
+  - platform: template
+    name: "Battery LED on Wake"
+    id: battery_led_on_wake
+    icon: mdi:led-on
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    entity_category: "config"
+
+  # Enable static IP instead of DHCP.
+  # WARNING: misconfiguration can lock out the device. Recover via USB or by accessing
+  # the web UI on the same subnet (mDNS still works locally).
+  - platform: template
+    name: "Use Static IP"
+    id: use_static_ip
+    icon: mdi:ip-network
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    entity_category: "config"
+    on_turn_on:
+      - lambda: 'ESP_LOGW("Apollo", "Static IP will be applied on next reboot. Reboot now to activate.");'
+    on_turn_off:
+      - lambda: 'ESP_LOGW("Apollo", "DHCP will be used on next reboot. Reboot now to activate.");'
 
   - platform: template
     name: "Prevent Sleep"
@@ -249,7 +409,6 @@ switch:
     restore_mode: ALWAYS_OFF
     optimistic: true
     entity_category: "config"
-    internal: true
     on_turn_on:
       then:
         - lambda: |-
@@ -260,17 +419,17 @@ switch:
             id(deep_sleep_1).allow_deep_sleep();
 
 interval:
-  # Safety net: if prevent_sleep is OFF and device has been awake 45s+, force sleep
-  # 45s is comfortable for healthy networks (typical link+DHCP+MQTT: ~10-15s).
-  # Bump to 60s if deploying on managed switches with slow STP (not RSTP).
+  # Safety net: if prevent_sleep is OFF and device has been awake > max_wake_time_s, force sleep.
+  # Timeout is configurable via the "Max Wake Time" number in the web server.
   - interval: 5s
-    startup_delay: 45s
+    startup_delay: 10s
     then:
       - if:
           condition:
             and:
               - switch.is_off: prevent_sleep
               - lambda: 'return !id(alarm_triggered_on_wake);'
+              - lambda: 'return millis() >= (uint32_t)(id(max_wake_time_s).state * 1000);'
           then:
             - lambda: |-
                 ESP_LOGW("Apollo", "Safety net: MQTT never connected — logging sensor state before sleep");
@@ -280,14 +439,20 @@ interval:
             - delay: 200ms
             - script.execute: prepare_and_sleep
 
-  # Publish MQTT data periodically when prevent_sleep is ON
-  - interval: 10s
+  # Publish MQTT data periodically when prevent_sleep is ON.
+  # Interval is configurable via "Publish Interval" number (default 10s).
+  - interval: 1s
     startup_delay: 30s
     then:
       - if:
           condition:
-            switch.is_on: prevent_sleep
+            and:
+              - switch.is_on: prevent_sleep
+              - lambda: |-
+                  uint32_t need_ms = (uint32_t)(id(prevent_sleep_publish_interval_s).state * 1000);
+                  return (millis() - id(last_prevent_sleep_publish_ms)) >= need_ms;
           then:
+            - lambda: 'id(last_prevent_sleep_publish_ms) = millis();'
             - script.execute: publish_mqtt_data
 
 script:
@@ -417,6 +582,31 @@ script:
           snprintf(topic, sizeof(topic), "%s/meta/deployment_notes", prefix);
           id(mqtt_client).publish(topic, notes, strlen(notes), 0, true);
 
+          // --- SEN55 hardware identification (cached from boot-time I2C read) ---
+          const char* sen55_ser = id(sen55_serial).c_str();
+          snprintf(topic, sizeof(topic), "%s/meta/sen55_serial", prefix);
+          id(mqtt_client).publish(topic, sen55_ser, strlen(sen55_ser), 0, true);
+
+          const char* sen55_fwver = id(sen55_fw).c_str();
+          snprintf(topic, sizeof(topic), "%s/meta/sen55_firmware", prefix);
+          id(mqtt_client).publish(topic, sen55_fwver, strlen(sen55_fwver), 0, true);
+
+          // --- SEN55 device status register (0xD206): 0 = healthy, non-zero = error flags ---
+          uint16_t status_words[2];
+          uint32_t sen55_status = 0;
+          bool status_ok = false;
+          if (id(sen55)->get_register((uint16_t)0xD206, status_words, 2, 20)) {
+            sen55_status = ((uint32_t)status_words[0] << 16) | status_words[1];
+            status_ok = true;
+            char status_buf[16];
+            snprintf(status_buf, sizeof(status_buf), "0x%08X", (unsigned int)sen55_status);
+            snprintf(topic, sizeof(topic), "%s/status/sen55_errors", prefix);
+            id(mqtt_client).publish(topic, status_buf, strlen(status_buf), 0, true);
+            if (sen55_status != 0) {
+              ESP_LOGW("Apollo", "SEN55 Status non-zero: %s (check fan/laser/gas/PM bits)", status_buf);
+            }
+          }
+
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGW("Apollo", "  IP Address:  %s", ip);
           ESP_LOGW("Apollo", "  Device ID:   %s (%s)", mac, mac_suffix);
@@ -431,6 +621,11 @@ script:
             ESP_LOGW("Apollo", "  Battery:     %d%% (voltage N/A)", batt);
           }
           ESP_LOGW("Apollo", "  Free Heap:   %u KB", (unsigned)free_heap_kb);
+          ESP_LOGW("Apollo", "  SEN55:       Serial %s, FW %s", sen55_ser, sen55_fwver);
+          if (status_ok) {
+            ESP_LOGW("Apollo", "  SEN55 Stat:  0x%08X %s", (unsigned int)sen55_status,
+                     sen55_status == 0 ? "(healthy)" : "(non-zero — check errors)");
+          }
           if (id(deployment_notes).state.length() > 0) {
             ESP_LOGW("Apollo", "  Notes:       %s", notes);
           }
@@ -440,24 +635,60 @@ script:
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGI("Apollo", "All MQTT data published");
 
-  # Consolidated sleep entry — all sleep paths call this script
+  # Read SEN55 serial number and firmware version via raw I2C.
+  # Called once at boot — results cached in globals for use in MQTT metadata + logs.
+  - id: read_sen55_info
+    then:
+      - lambda: |-
+          // Read serial number (command 0xD033, returns 16 words = 32 chars)
+          uint16_t serial_words[16];
+          if (id(sen55)->get_register((uint16_t)0xD033, serial_words, 16, 20)) {
+            char serial[33];
+            for (int i = 0; i < 16; i++) {
+              serial[i*2]   = (serial_words[i] >> 8) & 0xFF;
+              serial[i*2+1] = serial_words[i] & 0xFF;
+            }
+            serial[32] = '\0';
+            // Trim trailing null/space padding
+            for (int i = 31; i >= 0; i--) {
+              if (serial[i] == '\0' || serial[i] == ' ') serial[i] = '\0';
+              else break;
+            }
+            id(sen55_serial) = std::string(serial);
+          } else {
+            ESP_LOGW("Apollo", "SEN55: failed to read serial number");
+          }
+
+          // Read firmware version (command 0xD100, 1 word: major.minor)
+          uint16_t fw_word;
+          if (id(sen55)->get_register((uint16_t)0xD100, fw_word, 20)) {
+            uint8_t fw_major = (fw_word >> 8) & 0xFF;
+            uint8_t fw_minor = fw_word & 0xFF;
+            char fw_buf[8];
+            snprintf(fw_buf, sizeof(fw_buf), "%u.%u", fw_major, fw_minor);
+            id(sen55_fw) = std::string(fw_buf);
+          } else {
+            ESP_LOGW("Apollo", "SEN55: failed to read firmware version");
+          }
+
+          ESP_LOGW("Apollo", "SEN55 Serial: %s | Firmware: %s",
+                   id(sen55_serial).c_str(), id(sen55_fw).c_str());
+
+  # Consolidated sleep entry — all sleep paths call this script.
+  # NOTE: accessory_power off + GPIO7 hold live in on_shutdown (device file),
+  # NOT here. Cutting power to the W5500 before ethernet has cleanly torn down
+  # causes an intermittent hang that triggers the task watchdog. Letting ESPHome
+  # shut ethernet down first (while W5500 still has power) avoids that race.
   - id: prepare_and_sleep
     then:
       - lambda: |-
           ESP_LOGW("Apollo", "Preparing for deep sleep (awake for %.1f s)...", millis() / 1000.0f);
-          // Stop SEN55 measurement before cutting power
+          // Stop SEN55 measurement before teardown
           id(sen55)->write_command((uint16_t)0x0104);
       - delay: 50ms
-      - switch.turn_off: accessory_power
       - light.turn_off: rgb_light
       - rtttl.stop:
           id: rtttl_buzzer
-      - delay: 500ms
-      - lambda: |-
-          // Hold GPIO7 LOW through deep sleep to keep accessory rail off
-          gpio_hold_en(GPIO_NUM_7);
-          gpio_deep_sleep_hold_en();
-          ESP_LOGW("Apollo", "GPIO7 hold enabled, entering deep sleep");
       - deep_sleep.enter:
           id: deep_sleep_1
 
@@ -826,12 +1057,97 @@ text:
     max_length: 64
     mode: text
 
+  # Static network config — only applied when "Use Static IP" switch is ON.
+  # All fields are standard IPv4 dotted-decimal strings.
+  - platform: template
+    name: "Static IP"
+    id: static_ip
+    icon: mdi:ip-network
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 15
+    mode: text
+
+  - platform: template
+    name: "Static Gateway"
+    id: static_gateway
+    icon: mdi:router-network
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 15
+    mode: text
+
+  - platform: template
+    name: "Static Subnet"
+    id: static_subnet
+    icon: mdi:ip-network-outline
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: "255.255.255.0"
+    min_length: 0
+    max_length: 15
+    mode: text
+
+  - platform: template
+    name: "Static DNS 1"
+    id: static_dns1
+    icon: mdi:dns
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: "8.8.8.8"
+    min_length: 0
+    max_length: 15
+    mode: text
+
+  - platform: template
+    name: "Static DNS 2"
+    id: static_dns2
+    icon: mdi:dns-outline
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: "8.8.4.4"
+    min_length: 0
+    max_length: 15
+    mode: text
+
 text_sensor:
+
+  # Human-readable current-session uptime (resets to 0 on each wake from deep sleep).
+  # Most useful when Prevent Sleep is ON to watch how long you've been in debug mode.
+  - platform: template
+    name: "Uptime"
+    id: uptime_text
+    icon: mdi:timer-outline
+    entity_category: "diagnostic"
+    update_interval: 10s
+    lambda: |-
+      uint32_t s = millis() / 1000;
+      uint32_t h = s / 3600;
+      uint32_t m = (s % 3600) / 60;
+      uint32_t ss = s % 60;
+      char buf[32];
+      if (h > 0) {
+        snprintf(buf, sizeof(buf), "%uh %um %us", (unsigned)h, (unsigned)m, (unsigned)ss);
+      } else if (m > 0) {
+        snprintf(buf, sizeof(buf), "%um %us", (unsigned)m, (unsigned)ss);
+      } else {
+        snprintf(buf, sizeof(buf), "%us", (unsigned)ss);
+      }
+      return std::string(buf);
 
   - platform: template
     name: "Device ID"
     id: device_mac_address
-    internal: true
+    entity_category: "diagnostic"
     lambda: |-
       uint8_t mac[6];
       esp_read_mac(mac, ESP_MAC_BASE);
