@@ -65,7 +65,7 @@ web_server:
 
 deep_sleep:
   id: deep_sleep_1
-  sleep_duration: 2min  # TESTING — revert to 30min for deployment
+  sleep_duration: 30min  # PRODUCTION default (Toyota requirement)
   # Wake on button press (GPIO0 grounded). Adds ~5µA during sleep (negligible).
   # INVERT_WAKEUP handles the edge case of button held at sleep entry.
   wakeup_pin:
@@ -290,6 +290,22 @@ light:
           max_brightness: 25%
 
 number:
+  # MQTT broker port override (0 = use compile-time !secret port).
+  # Takes effect on next reboot.
+  - platform: template
+    name: "MQTT Port"
+    id: mqtt_port_override
+    min_value: 0
+    max_value: 65535
+    step: 1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: mdi:numeric
+    entity_category: CONFIG
+
   # Max wake time before safety-net forces sleep (seconds from boot).
   # 45s default is comfortable for healthy networks. Bump higher for slow STP or flaky DNS.
   - platform: template
@@ -343,7 +359,7 @@ number:
 
   # Deep sleep duration in MINUTES — configurable via web server text box.
   # restore_value: true persists web UI changes across reboots.
-  # TESTING: initial_value 2. For deployment, change to 30.
+  # PRODUCTION default: 30 min (Toyota requirement).
   - platform: template
     name: "Sleep Duration"
     id: deep_sleep_sleep_duration
@@ -354,7 +370,7 @@ number:
     update_interval: never
     optimistic: true
     restore_value: true
-    initial_value: 2
+    initial_value: 30
     icon: "mdi:arrow-collapse-right"
     entity_category: CONFIG
     unit_of_measurement: "min"
@@ -1042,6 +1058,73 @@ text:
     min_length: 0
     max_length: 16
     mode: text
+
+  # MQTT broker override — empty means use compile-time !secret value.
+  # Takes effect on next reboot. WARNING: stored in NVS as plaintext.
+  - platform: template
+    name: "MQTT Broker"
+    id: mqtt_broker_override
+    icon: mdi:server-network
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 64
+    mode: text
+
+  - platform: template
+    name: "MQTT Username"
+    id: mqtt_username_override
+    icon: mdi:account
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 32
+    mode: text
+
+  # MQTT password — masked display via mode: password. Stored plaintext in NVS.
+  - platform: template
+    name: "MQTT Password"
+    id: mqtt_password_override
+    icon: mdi:lock
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 64
+    mode: password
+
+  # Web UI auth username — empty means use compile-time default (admin).
+  - platform: template
+    name: "Web Auth Username"
+    id: web_auth_username_override
+    icon: mdi:account-key
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 32
+    mode: text
+
+  # Web UI auth password — empty means use compile-time default.
+  # WARNING: a wrong/forgotten password locks you out of the web UI.
+  # Recovery requires USB reflash.
+  - platform: template
+    name: "Web Auth Password"
+    id: web_auth_password_override
+    icon: mdi:lock-question
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 64
+    mode: password
 
   # Free-form deployment notes — published as MQTT metadata for identification.
   # Useful for "installed by X on Y near Z" info that persists across reboots.

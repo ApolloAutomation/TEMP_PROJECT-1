@@ -47,6 +47,45 @@ esphome:
               else                             cause = "other";
             }
             ESP_LOGW("Apollo", "Wake cause: %s — GPIO7 hold released", cause);
+    # Apply MQTT broker/credentials and web auth overrides BEFORE the MQTT
+    # client (priority 250) and web server (priority 250) initialize.
+    # Empty/zero values = fall back to the compile-time !secret defaults.
+    - priority: 700
+      then:
+        - lambda: |-
+            // ----- MQTT credentials -----
+            if (!id(mqtt_broker_override).state.empty()) {
+              id(mqtt_client)->set_broker_address(id(mqtt_broker_override).state);
+              ESP_LOGW("Apollo", "MQTT broker override: %s", id(mqtt_broker_override).state.c_str());
+            }
+            if (id(mqtt_port_override).state > 0) {
+              uint16_t p = (uint16_t)id(mqtt_port_override).state;
+              id(mqtt_client)->set_broker_port(p);
+              ESP_LOGW("Apollo", "MQTT port override: %u", p);
+            }
+            if (!id(mqtt_username_override).state.empty()) {
+              id(mqtt_client)->set_username(id(mqtt_username_override).state);
+              ESP_LOGW("Apollo", "MQTT username override applied");
+            }
+            if (!id(mqtt_password_override).state.empty()) {
+              id(mqtt_client)->set_password(id(mqtt_password_override).state);
+              ESP_LOGW("Apollo", "MQTT password override applied");
+            }
+
+            // ----- Web server auth -----
+            if (web_server_base::global_web_server_base) {
+              if (!id(web_auth_username_override).state.empty()) {
+                web_server_base::global_web_server_base->set_auth_username(
+                  id(web_auth_username_override).state);
+                ESP_LOGW("Apollo", "Web auth username override applied");
+              }
+              if (!id(web_auth_password_override).state.empty()) {
+                web_server_base::global_web_server_base->set_auth_password(
+                  id(web_auth_password_override).state);
+                ESP_LOGW("Apollo", "Web auth password override applied");
+              }
+            }
+
     # After ethernet netif is created (priority ~250) but before app loop (priority -100),
     # apply static IP if the user has enabled it via the web UI.
     - priority: 200
@@ -427,6 +466,63 @@ mqtt:
             } else {
               ESP_LOGW("Apollo", "Invalid publish_interval: %.2f (must be 1-3600 s)", v);
             }
+
+    # MQTT broker hostname or IP (takes effect on next reboot)
+    - topic: apollo/temp-pro-1/command/mqtt_broker
+      then:
+        - lambda: |-
+            auto call = id(mqtt_broker_override).make_call();
+            call.set_value(x.c_str());
+            call.perform();
+            ESP_LOGI("Apollo", "MQTT broker set via MQTT (reboot to apply): %s", x.c_str());
+
+    # MQTT broker port (0 = use compile-time default)
+    - topic: apollo/temp-pro-1/command/mqtt_port
+      then:
+        - lambda: |-
+            float p = atof(x.c_str());
+            if (p >= 0 && p <= 65535) {
+              id(mqtt_port_override).publish_state(p);
+              ESP_LOGI("Apollo", "MQTT port set via MQTT (reboot to apply): %.0f", p);
+            } else {
+              ESP_LOGW("Apollo", "Invalid mqtt_port: %.2f", p);
+            }
+
+    # MQTT username (takes effect on next reboot)
+    - topic: apollo/temp-pro-1/command/mqtt_username
+      then:
+        - lambda: |-
+            auto call = id(mqtt_username_override).make_call();
+            call.set_value(x.c_str());
+            call.perform();
+            ESP_LOGI("Apollo", "MQTT username set via MQTT (reboot to apply)");
+
+    # MQTT password (takes effect on next reboot) — careful, sensitive
+    - topic: apollo/temp-pro-1/command/mqtt_password
+      then:
+        - lambda: |-
+            auto call = id(mqtt_password_override).make_call();
+            call.set_value(x.c_str());
+            call.perform();
+            ESP_LOGI("Apollo", "MQTT password set via MQTT (reboot to apply)");
+
+    # Web UI auth username (takes effect on next reboot)
+    - topic: apollo/temp-pro-1/command/web_auth_username
+      then:
+        - lambda: |-
+            auto call = id(web_auth_username_override).make_call();
+            call.set_value(x.c_str());
+            call.perform();
+            ESP_LOGI("Apollo", "Web auth username set via MQTT (reboot to apply)");
+
+    # Web UI auth password (takes effect on next reboot) — be careful, lockout risk
+    - topic: apollo/temp-pro-1/command/web_auth_password
+      then:
+        - lambda: |-
+            auto call = id(web_auth_password_override).make_call();
+            call.set_value(x.c_str());
+            call.perform();
+            ESP_LOGW("Apollo", "Web auth password set via MQTT (reboot to apply) — verify before reboot to avoid lockout");
 
 script:
   - id: statusCheck
