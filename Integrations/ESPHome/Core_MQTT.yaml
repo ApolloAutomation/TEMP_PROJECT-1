@@ -178,6 +178,23 @@ sensor:
     store_baseline: false
     update_interval: 10s
 
+  # SHT3x temperature + humidity sensor (more accurate than SEN55's internal RH/T).
+  # Temperature converted from native °C to °F to match ESP Temperature.
+  - platform: sht3xd
+    id: sht3xd_sensor
+    temperature:
+      name: "Temperature"
+      id: sht_temperature
+      accuracy_decimals: 1
+      unit_of_measurement: "°F"
+      filters:
+        - lambda: 'return x * 9.0 / 5.0 + 32.0;'
+    humidity:
+      name: "Relative Humidity"
+      id: sht_humidity
+      accuracy_decimals: 1
+    update_interval: 10s
+
   # PM mass concentration ranges (what's actually in each size bucket).
   # SEN55 reports cumulative values (<1µm includes all smaller); we subtract
   # to get per-bucket values.
@@ -543,6 +560,19 @@ script:
           snprintf(buf, sizeof(buf), "%d", batt);
           id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
 
+          // SHT3x temperature (°F) and humidity (%) — always publish, like PM/battery.
+          // NaN → -1 sentinel so subscribers can detect a sensor failure.
+          float temp_f = std::isnan(id(sht_temperature).state) ? -1.0f : id(sht_temperature).state;
+          float rh_pct = std::isnan(id(sht_humidity).state) ? -1.0f : id(sht_humidity).state;
+
+          snprintf(topic, sizeof(topic), "%s/sensor/temperature", prefix);
+          snprintf(buf, sizeof(buf), "%.1f", temp_f);
+          id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+
+          snprintf(topic, sizeof(topic), "%s/sensor/humidity", prefix);
+          snprintf(buf, sizeof(buf), "%.1f", rh_pct);
+          id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+
           // Publish metadata (retained)
           const char* ip = id(device_ip_address).state.c_str();
 
@@ -562,6 +592,14 @@ script:
           const char* unit_batt = "%";
           snprintf(topic, sizeof(topic), "%s/meta/unit_battery", prefix);
           id(mqtt_client).publish(topic, unit_batt, strlen(unit_batt), 0, true);
+
+          const char* unit_temp = "F";
+          snprintf(topic, sizeof(topic), "%s/meta/unit_temperature", prefix);
+          id(mqtt_client).publish(topic, unit_temp, strlen(unit_temp), 0, true);
+
+          const char* unit_rh = "%";
+          snprintf(topic, sizeof(topic), "%s/meta/unit_humidity", prefix);
+          id(mqtt_client).publish(topic, unit_rh, strlen(unit_rh), 0, true);
 
           const char* sleep_mode = id(prevent_sleep).state ? "OFF" : "ON";
           snprintf(topic, sizeof(topic), "%s/meta/sleep_mode", prefix);
@@ -647,6 +685,9 @@ script:
           }
           ESP_LOGW("Apollo", "  PM 0.3-1: %.1f | 1-2.5: %.1f | 2.5-4: %.1f | 4-10: %.1f | Total: %.1f ug/m3",
                    pm_vals[0], pm_vals[1], pm_vals[2], pm_vals[3], total);
+          ESP_LOGW("Apollo", "  Temp/RH:     %.1f °F / %.1f %% %s",
+                   temp_f, rh_pct,
+                   (temp_f < 0 || rh_pct < 0) ? "[SHT3x failing]" : "");
           ESP_LOGW("Apollo", "  Topics: %s/sensor/...", prefix);
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGI("Apollo", "All MQTT data published");

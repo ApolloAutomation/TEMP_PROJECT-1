@@ -242,6 +242,7 @@ mqtt:
                 timeout: 60s
             # Trigger stabilized sensor reads
             - component.update: sen55
+            - component.update: sht3xd_sensor
             - component.update: max_17048
             # Safety check: ensure reads returned valid (non-NaN) data
             - wait_until:
@@ -251,6 +252,8 @@ mqtt:
                            !std::isnan(id(pm_2_5).state) &&
                            !std::isnan(id(pm_4_0).state) &&
                            !std::isnan(id(pm_10_0).state) &&
+                           !std::isnan(id(sht_temperature).state) &&
+                           !std::isnan(id(sht_humidity).state) &&
                            !std::isnan(id(batt_pct).state) &&
                            !id(device_mac_address).state.empty();
                 timeout: 10s
