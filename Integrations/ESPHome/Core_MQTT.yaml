@@ -1140,6 +1140,7 @@ script:
           ESP_LOGW("Apollo", "  Device ID:   %s (%s)", mac, mac_suffix);
           ESP_LOGW("Apollo", "  Column ID:   %s", device_suffix);
           ESP_LOGW("Apollo", "  Device:      %s", name);
+          ESP_LOGW("Apollo", "  Power Src:   %s", id(power_source).current_option().c_str());
           ESP_LOGW("Apollo", "  Firmware:    %s", fw_ver);
           ESP_LOGW("Apollo", "  Boot Count:  %u", (unsigned)id(boot_count));
           ESP_LOGW("Apollo", "  Wake Time:   %.1f s", wake_sec);
