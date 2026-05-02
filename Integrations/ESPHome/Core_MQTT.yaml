@@ -171,6 +171,10 @@ deep_sleep:
     number: GPIO0
     inverted: true
     allow_other_uses: true
+    # GPIO0 is a strapping pin (sampled at boot for download-mode select).
+    # Safe here because we use only the internal pullup — no external
+    # circuitry that could hold it LOW at power-on.
+    ignore_strapping_warning: true
     mode:
       input: true
       pullup: true
@@ -192,6 +196,7 @@ binary_sensor:
       number: GPIO0
       inverted: true
       allow_other_uses: true  # shared with deep_sleep wakeup_pin
+      ignore_strapping_warning: true  # see deep_sleep wakeup_pin for rationale
       mode:
         input: true
         pullup: true
