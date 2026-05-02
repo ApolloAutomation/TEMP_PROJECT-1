@@ -767,22 +767,30 @@ switch:
   # NOTE: the old `prevent_sleep` switch was merged into the `power_source`
   # select (battery=sleeps, wired=stays awake). Both were doing the same job.
 
-  # Verbose logging toggle — flips the runtime log level between WARN and DEBUG
-  # without re-flashing. Useful for live debugging in the field. Defaults to
-  # OFF on every boot (battery cost of DEBUG-level logging is non-trivial).
+  # Verbose logging toggle — flips runtime log level between DEBUG (verbose,
+  # default) and WARN (quiet) without re-flashing.
+  #
+  # ALWAYS_ON intentionally — DEBUG is what techs expect to see (the "blue"
+  # [D][sensor:...] lines that show every per-sensor reading). The previous
+  # ALWAYS_OFF default fired on_turn_off during setup, silencing DEBUG before
+  # any sensor publishes happened, which broke the visible-by-default behavior.
+  #
+  # Toggle OFF in the web UI to silence DEBUG temporarily for the current run
+  # (resets to ON on next reboot — by design, so you can never get permanently
+  # locked out of seeing sensor readings if you walk away with it OFF).
+  # Battery cost of DEBUG vs WARN is negligible (~µs per log line).
   - platform: template
     name: "Verbose Logging"
     id: verbose_logging
     icon: mdi:console-line
-    restore_mode: ALWAYS_OFF
+    restore_mode: ALWAYS_ON
     optimistic: true
     entity_category: "diagnostic"
     on_turn_on:
       - logger.set_level: DEBUG
-      - lambda: 'ESP_LOGW("Apollo", "Verbose logging ENABLED (DEBUG level)");'
     on_turn_off:
       - logger.set_level: WARN
-      - lambda: 'ESP_LOGW("Apollo", "Verbose logging DISABLED (WARN level)");'
+      - lambda: 'ESP_LOGW("Apollo", "Verbose logging DISABLED — log level set to WARN until next reboot");'
 
 interval:
   # Battery-device wake-time enforcer. Single rule: if `power_source == battery`
