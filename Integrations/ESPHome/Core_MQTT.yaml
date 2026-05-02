@@ -858,22 +858,26 @@ interval:
             - lambda: 'id(last_prevent_sleep_publish_ms) = millis();'
             - script.execute: publish_mqtt_data
 
-  # Periodic drain-check for wired devices. Battery devices run the drain
-  # detector every wake via on_connect; wired devices need this interval
-  # because their on_connect runs only once per boot. Cadence is 30 min to
-  # match the script's internal min-window — running more often wouldn't
-  # produce earlier alarms (the script would just exit on min-window).
-  # Startup delay of 5 min lets the initial post-boot baseline settle before
-  # the first periodic check runs.
-  - interval: 30min
-    startup_delay: 5min
+  # Periodic drain-check + sensor-health tracking for wired devices. Battery
+  # devices run these every wake via on_connect; wired devices need this
+  # interval because their on_connect runs only once per boot.
+  #
+  # Cadence dropped to 5 min so the wired-cumulative-drop trigger and the
+  # lifetime battery min/max can refresh frequently (drain detection no
+  # longer needs the old 30-min internal min-window now that the rate floor
+  # is 5 min). Sensor reads + script overhead cost is negligible (~ms).
+  - interval: 5min
+    startup_delay: 1min
     then:
       - if:
           condition:
             lambda: 'return id(power_source).current_option() == "wired";'
           then:
             - component.update: max_17048
+            - component.update: sen55
+            - component.update: sht3xd_sensor
             - delay: 1s
+            - script.execute: track_sensor_health
             - script.execute: check_battery_drain
 
 script:
@@ -1352,16 +1356,19 @@ script:
           // Case 1: first boot ever, no baseline yet.
           if (baseline < 0.0f) { set_baseline("initialized"); return; }
 
-          // Case 2: WIRED device, first call since reboot. The NVS-restored
-          // baseline is from a prior boot session; millis() is meaningless
-          // across reboots. Reset baseline to current (we lose pre-reboot
-          // history but avoid wildly-wrong rate calculations).
-          if (is_wired && id(baseline_set_at_ms) == 0) {
-            set_baseline("reset (wired reboot)");
-            return;
+          // Stamp baseline_set_at_ms with current millis() if it's still zero
+          // (first call after a reboot — millis() doesn't survive deep sleep
+          // or reset). We do NOT reset the baseline percentage here — it's
+          // NVS-restored, so cumulative drop across reboots is preserved.
+          // Rate-based alarm requires a sufficient elapsed window to be
+          // meaningful, so a fresh reboot won't false-trigger on rate.
+          if (id(baseline_set_at_ms) == 0) {
+            uint32_t now = millis();
+            id(baseline_set_at_ms) = (now == 0) ? 1 : now;
+            ESP_LOGI("Apollo", "Drain check: stamped baseline_set_at_ms after reboot — preserved baseline %.1f%%", baseline);
           }
 
-          // Case 3: battery rose ≥5% above baseline → charging detected.
+          // Case 2: battery rose ≥5% above baseline → charging detected.
           if (current >= baseline + 5.0f) {
             set_baseline("reset (charging detected)");
             return;
@@ -1379,13 +1386,6 @@ script:
             total_minutes = (float)boots_elapsed * id(deep_sleep_sleep_duration).state;
           }
 
-          // Need ≥30 min of elapsed time before the rate calculation is
-          // statistically meaningful. Below that, exit (baseline persists).
-          if (total_minutes < 30.0f) {
-            ESP_LOGI("Apollo", "Drain check: window too short (%.0f min, need ≥30) — holding baseline", total_minutes);
-            return;
-          }
-
           // Drop = how far we've fallen from baseline. Negative = noise spike
           // up but under the 5% rise threshold; just exit.
           float drop = baseline - current;
@@ -1394,7 +1394,10 @@ script:
             return;
           }
 
-          float rate = drop * (60.0f / total_minutes);
+          // Rate uses guarded division — total_minutes can be 0 or negative
+          // due to millis() weirdness right at boot; in that case treat rate
+          // as 0 and let cumulative-drop triggers handle it.
+          float rate = (total_minutes > 0.0f) ? drop * (60.0f / total_minutes) : 0.0f;
           float min_drop = id(drain_min_drop_pct).state;
           float rate_thr = id(drain_threshold_pct_per_hour).state;
 
@@ -1402,14 +1405,18 @@ script:
                    is_wired ? "wired" : "battery", drop, total_minutes, rate, min_drop, rate_thr);
 
           // ---- Trigger conditions ----
-          // Trigger 1: rate-based — both rate AND drop exceed thresholds (filters
-          // both noise spikes and slow degradation; same for battery and wired).
-          bool trip_rate = (drop >= min_drop && rate >= rate_thr);
+          // Trigger 1: rate-based — both rate AND drop exceed thresholds.
+          // Requires ≥5 min elapsed so transient noise on a single reading
+          // can't fire the alarm. min_drop floor (3% by default) further
+          // filters MAX17048 jitter (~1-2% per reading).
+          bool trip_rate = (total_minutes >= 5.0f &&
+                            drop >= min_drop && rate >= rate_thr);
 
           // Trigger 2: wired-cumulative — wired devices should never drain;
-          // any sustained drop above wired_drop_threshold_pct is "lost wired
-          // power" until proven otherwise, regardless of rate. Catches very
-          // slow drains (~1 %/h idle) that wouldn't trip the rate threshold.
+          // any drop above wired_drop_threshold_pct (default 5%) means lost
+          // wired power, regardless of rate or window. This catches very
+          // slow drains AND drains that span reboots (baseline is now
+          // preserved across reboots, so the drop accumulates).
           bool trip_wired_drop = (is_wired &&
                                   id(wired_drop_threshold_pct).state > 0.0f &&
                                   drop >= id(wired_drop_threshold_pct).state);
@@ -1489,6 +1496,18 @@ script:
                      (unsigned)id(rapid_boot_count));
             id(deep_sleep_1).set_sleep_duration(30ULL * 60ULL * 1000ULL);
             id(boot_loop_force_sleep) = true;
+            // Flip to battery mode so deep sleep actually takes effect.
+            // Wired mode calls prevent_deep_sleep() which would block the
+            // cooldown; battery mode lets the wake-time-cap interval (or
+            // the on_connect path if MQTT recovers) actually call sleep.
+            // Operator can switch back to wired after the underlying issue
+            // (whatever is causing crash-loops) is resolved.
+            if (id(power_source).current_option() != "battery") {
+              auto call = id(power_source).make_call();
+              call.set_option("battery");
+              call.perform();
+              ESP_LOGE("Apollo", "Boot loop: flipped to battery mode so cooldown can take effect");
+            }
           }
 
   # ---------------------------------------------------------------------
