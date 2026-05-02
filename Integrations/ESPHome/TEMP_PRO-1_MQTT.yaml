@@ -197,7 +197,7 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return id(power_source).state == "battery";'
+              lambda: 'return id(power_source).current_option() == "battery";'
             then:
               - lambda: |-
                   if (x == "ON" || x == "on" || x == "1" || x == "true") {
@@ -210,7 +210,7 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return id(power_source).state == "wired";'
+              lambda: 'return id(power_source).current_option() == "wired";'
             then:
               - lambda: |-
                   if (x == "ON" || x == "on" || x == "1" || x == "true") {

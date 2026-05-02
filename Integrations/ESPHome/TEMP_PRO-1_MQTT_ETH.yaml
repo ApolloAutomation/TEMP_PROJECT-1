@@ -162,7 +162,7 @@ esphome:
         - script.execute: check_boot_loop
         - if:
             condition:
-              lambda: 'return id(power_source).state == "wired";'
+              lambda: 'return id(power_source).current_option() == "wired";'
             then:
               - lambda: |-
                   ESP_LOGW("Apollo", "Wired mode on boot — deep sleep prevented");
@@ -177,7 +177,7 @@ esphome:
         - if:
             condition:
               or:
-                - lambda: 'return id(power_source).state == "wired";'
+                - lambda: 'return id(power_source).current_option() == "wired";'
                 - switch.is_on: battery_led_on_wake
             then:
               - delay: 500ms
@@ -351,7 +351,7 @@ mqtt:
       # rely on the periodic publish-while-wired interval for ongoing data.
       - if:
           condition:
-            lambda: 'return id(power_source).state == "battery";'
+            lambda: 'return id(power_source).current_option() == "battery";'
           then:
             - script.execute: prepare_and_sleep
 
@@ -395,7 +395,7 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return id(power_source).state == "battery";'
+              lambda: 'return id(power_source).current_option() == "battery";'
             then:
               - lambda: |-
                   std::string mode;
@@ -410,7 +410,7 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return id(power_source).state == "wired";'
+              lambda: 'return id(power_source).current_option() == "wired";'
             then:
               - lambda: |-
                   std::string mode;
@@ -436,7 +436,7 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return id(power_source).state == "battery";'
+              lambda: 'return id(power_source).current_option() == "battery";'
             then:
               - lambda: |-
                   std::string mode = (x == "ON" || x == "on") ? "wired" : "battery";
@@ -448,7 +448,7 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return id(power_source).state == "wired";'
+              lambda: 'return id(power_source).current_option() == "wired";'
             then:
               - lambda: |-
                   std::string mode = (x == "ON" || x == "on") ? "wired" : "battery";
@@ -547,7 +547,7 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return id(power_source).state == "battery";'
+              lambda: 'return id(power_source).current_option() == "battery";'
             then:
               - lambda: |-
                   float minutes = atof(x.c_str());
@@ -560,7 +560,7 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return id(power_source).state == "wired";'
+              lambda: 'return id(power_source).current_option() == "wired";'
             then:
               - lambda: |-
                   float minutes = atof(x.c_str());
@@ -778,7 +778,7 @@ button:
     on_press:
       - lambda: |-
           ESP_LOGW("Apollo", "Force Sleep triggered via web UI");
-          if (id(power_source).state != "battery") {
+          if (id(power_source).current_option() != "battery") {
             auto call = id(power_source).make_call();
             call.set_option("battery");
             call.perform();

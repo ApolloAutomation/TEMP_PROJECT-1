@@ -213,7 +213,7 @@ binary_sensor:
         then:
           - lambda: |-
               auto call = id(power_source).make_call();
-              if (id(power_source).state == "wired") {
+              if (id(power_source).current_option() == "wired") {
                 call.set_option("battery");
                 ESP_LOGW("Apollo", "Power source set to BATTERY via 3x button press");
               } else {
@@ -223,7 +223,7 @@ binary_sensor:
               call.perform();
           - if:
               condition:
-                lambda: 'return id(power_source).state == "wired";'
+                lambda: 'return id(power_source).current_option() == "wired";'
               then:
                 - light.turn_on:
                     id: rgb_light
@@ -774,7 +774,7 @@ interval:
       - if:
           condition:
             and:
-              - lambda: 'return id(power_source).state == "battery";'
+              - lambda: 'return id(power_source).current_option() == "battery";'
               - lambda: 'return !id(alarm_triggered_on_wake);'
               - lambda: 'return millis() >= (uint32_t)(id(max_wake_time_s).state * 1000);'
           then:
@@ -796,7 +796,7 @@ interval:
       - if:
           condition:
             and:
-              - lambda: 'return id(power_source).state == "wired";'
+              - lambda: 'return id(power_source).current_option() == "wired";'
               - lambda: |-
                   uint32_t need_ms = (uint32_t)(id(prevent_sleep_publish_interval_s).state * 1000);
                   return (millis() - id(last_prevent_sleep_publish_ms)) >= need_ms;
@@ -816,7 +816,7 @@ interval:
     then:
       - if:
           condition:
-            lambda: 'return id(power_source).state == "wired";'
+            lambda: 'return id(power_source).current_option() == "wired";'
           then:
             - component.update: max_17048
             - delay: 1s
@@ -939,13 +939,13 @@ script:
           // with subscribers that watch this topic. battery → "ON" (will sleep),
           // wired → "OFF" (won't sleep). New deployments should subscribe to
           // meta/power_source instead.
-          const char* sleep_mode = (id(power_source).state == "wired") ? "OFF" : "ON";
+          const char* sleep_mode = (id(power_source).current_option() == "wired") ? "OFF" : "ON";
           snprintf(topic, sizeof(topic), "%s/meta/sleep_mode", prefix);
           id(mqtt_client).publish(topic, sleep_mode, strlen(sleep_mode), 0, true);
 
           // Power source — "battery" or "wired". The single source of truth
           // for sleep behavior; replaced the old separate prevent_sleep switch.
-          std::string power_src = id(power_source).state;
+          std::string power_src = id(power_source).current_option();
           snprintf(topic, sizeof(topic), "%s/meta/power_source", prefix);
           id(mqtt_client).publish(topic, power_src.c_str(), power_src.length(), 0, true);
 
@@ -1266,7 +1266,7 @@ script:
           float current = id(batt_pct).state;
           if (std::isnan(current) || current < 0.0f || current > 100.0f) return;
 
-          bool is_wired = (id(power_source).state == "wired");
+          bool is_wired = (id(power_source).current_option() == "wired");
           float baseline = id(battery_pct_at_last_wake);
 
           // Helper: stamp a fresh baseline (value + boot count + millis).
@@ -1339,7 +1339,7 @@ script:
             ESP_LOGE("Apollo", "DRAIN ALARM #%u: %.1f%% drop / %.2f%%/h rate exceeds floors (%.1f%%, %.1f%%/h) — flipping to battery mode",
                      (unsigned)id(drain_trigger_count),
                      drop, rate, min_drop, rate_thr);
-            if (id(power_source).state != "battery") {
+            if (id(power_source).current_option() != "battery") {
               auto call = id(power_source).make_call();
               call.set_option("battery");
               call.perform();
@@ -1418,7 +1418,7 @@ script:
     then:
       - lambda: |-
           id(critical_battery_active) = false;
-          if (id(power_source).state != "battery") return;
+          if (id(power_source).current_option() != "battery") return;
           if (id(critical_battery_threshold_pct).state <= 0.0f) return;
           float pct = id(batt_pct).state;
           if (std::isnan(pct)) return;
