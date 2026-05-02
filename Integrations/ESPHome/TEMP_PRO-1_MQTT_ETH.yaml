@@ -155,21 +155,22 @@ esphome:
             id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 1000);
         - if:
             condition:
-              switch.is_on: prevent_sleep
+              lambda: 'return id(power_source).state == "wired";'
             then:
               - lambda: |-
-                  ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch On Boot");
+                  ESP_LOGW("Apollo", "Wired mode on boot — deep sleep prevented");
                   id(deep_sleep_1).prevent_deep_sleep();
         # Battery sensor always updated (needed for MQTT publish)
         - component.update: max_17048
         # Read SEN55 serial + firmware once per wake (cached in globals for MQTT/log)
         - script.execute: read_sen55_info
-        # Battery LED indicator — shown when either "Prevent Sleep" or
-        # "Battery LED on Wake" is ON. Default is silent (both off) to save battery.
+        # Battery LED indicator — shown when device is wired (always-on, so the
+        # tech wants visual confirmation) or when "Battery LED on Wake" is enabled.
+        # Default for battery devices is silent (LED off) to save battery.
         - if:
             condition:
               or:
-                - switch.is_on: prevent_sleep
+                - lambda: 'return id(power_source).state == "wired";'
                 - switch.is_on: battery_led_on_wake
             then:
               - delay: 500ms
@@ -227,47 +228,85 @@ mqtt:
   on_connect:
     then:
       - logger.log: "Connected to MQTT broker"
+      # ---------------------------------------------------------------------
+      # Self-heal scrub: on every successful connect, clear any retained
+      # command messages at the broker by publishing empty + retain=true to
+      # each command topic. Protects against an old firmware version (or an
+      # Ignition tag binding with writeback) that left a retained `ON` on
+      # `command/prevent_sleep` and silently drained every battery overnight.
+      #
+      # The actual drain protection lives in the safety-net interval in
+      # Core_MQTT.yaml — this scrub is just hygiene at the broker.
+      # ---------------------------------------------------------------------
+      - lambda: |-
+          auto clear = [](const char* topic) {
+            id(mqtt_client).publish(topic, "", 0, 0, true);
+          };
+          // Broadcast command topics
+          clear("apollo/temp-pro-1/command/prevent_sleep");
+          clear("apollo/temp-pro-1/command/sleep_duration");
+          clear("apollo/temp-pro-1/command/restart");
+          clear("apollo/temp-pro-1/command/light/on");
+          clear("apollo/temp-pro-1/command/light/off");
+          clear("apollo/temp-pro-1/command/light/red");
+          clear("apollo/temp-pro-1/command/light/green");
+          clear("apollo/temp-pro-1/command/light/blue");
+          clear("apollo/temp-pro-1/command/light/rgb");
+          clear("apollo/temp-pro-1/command/light/effect");
+          clear("apollo/temp-pro-1/command/buzzer");
+          clear("apollo/temp-pro-1/command/buzzer/stop");
+          clear("apollo/temp-pro-1/command/column_id");
+          // Class-scoped command topics (battery / wired)
+          clear("apollo/temp-pro-1/battery/command/prevent_sleep");
+          clear("apollo/temp-pro-1/battery/command/sleep_duration");
+          clear("apollo/temp-pro-1/battery/command/power_source");
+          clear("apollo/temp-pro-1/wired/command/prevent_sleep");
+          clear("apollo/temp-pro-1/wired/command/sleep_duration");
+          clear("apollo/temp-pro-1/wired/command/power_source");
+          // New power_source command topic (broadcast)
+          clear("apollo/temp-pro-1/command/power_source");
+          ESP_LOGI("Apollo", "Cleared retained command topics at broker");
+      # Wait for SEN55 to stabilize — duration configurable via "Warm-up Delay" number.
+      # Uses millis() so this self-adjusts: if MQTT took longer than warmup to connect, skip wait.
+      - wait_until:
+          condition:
+            lambda: 'return millis() > (uint32_t)(id(warmup_delay_s).state * 1000);'
+          timeout: 60s
+      # Trigger stabilized sensor reads
+      - component.update: sen55
+      - component.update: sht3xd_sensor
+      - component.update: max_17048
+      # Safety check: ensure reads returned valid (non-NaN) data
+      - wait_until:
+          condition:
+            lambda: |-
+              return !std::isnan(id(pm_1_0).state) &&
+                     !std::isnan(id(pm_2_5).state) &&
+                     !std::isnan(id(pm_4_0).state) &&
+                     !std::isnan(id(pm_10_0).state) &&
+                     !std::isnan(id(sht_temperature).state) &&
+                     !std::isnan(id(sht_humidity).state) &&
+                     !std::isnan(id(batt_pct).state) &&
+                     !id(device_mac_address).state.empty();
+          timeout: 10s
+      # Force IP address refresh before publishing
+      - component.update: device_ip_address
+      # Drain-rate safety check — must run AFTER battery is valid (so we have
+      # a current reading) and BEFORE publish (so the status flag goes out in
+      # the same wake cycle if the alarm trips, including a possible flip from
+      # wired→battery that we want reflected in meta/power_source).
+      - script.execute: check_battery_drain
+      # Publish all MQTT data once
+      - script.execute: publish_mqtt_data
+      # Wait for MQTT messages to be sent
+      - delay: 1s
+      # Battery devices sleep here. Wired devices skip — they stay awake and
+      # rely on the periodic publish-while-wired interval for ongoing data.
       - if:
           condition:
-            switch.is_on: prevent_sleep
+            lambda: 'return id(power_source).state == "battery";'
           then:
-            - lambda: |-
-                ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch");
-          else:
-            # Wait for SEN55 to stabilize — duration configurable via "Warm-up Delay" number.
-            # Uses millis() so this self-adjusts: if MQTT took longer than warmup to connect, skip wait.
-            - wait_until:
-                condition:
-                  lambda: 'return millis() > (uint32_t)(id(warmup_delay_s).state * 1000);'
-                timeout: 60s
-            # Trigger stabilized sensor reads
-            - component.update: sen55
-            - component.update: sht3xd_sensor
-            - component.update: max_17048
-            # Safety check: ensure reads returned valid (non-NaN) data
-            - wait_until:
-                condition:
-                  lambda: |-
-                    return !std::isnan(id(pm_1_0).state) &&
-                           !std::isnan(id(pm_2_5).state) &&
-                           !std::isnan(id(pm_4_0).state) &&
-                           !std::isnan(id(pm_10_0).state) &&
-                           !std::isnan(id(sht_temperature).state) &&
-                           !std::isnan(id(sht_humidity).state) &&
-                           !std::isnan(id(batt_pct).state) &&
-                           !id(device_mac_address).state.empty();
-                timeout: 10s
-            # Force IP address refresh before publishing
-            - component.update: device_ip_address
-            # Publish all MQTT data once
-            - script.execute: publish_mqtt_data
-            # Wait for MQTT messages to be sent
-            - delay: 1s
-            - if:
-                condition:
-                  switch.is_off: prevent_sleep
-                then:
-                  - script.execute: prepare_and_sleep
+            - script.execute: prepare_and_sleep
 
   on_message:
     # Restart command
@@ -276,15 +315,99 @@ mqtt:
         - logger.log: "Restart command received via MQTT"
         - button.press: esp_reboot
 
-    # Prevent sleep control
+    # ============================================================
+    # Power-mode commands. Two payload conventions, both supported:
+    #   • New: "battery" / "wired" → set power_source directly
+    #   • Legacy: "ON" (= wired) / "OFF" (= battery) for clients still using
+    #     the old prevent_sleep semantics. The legacy `command/prevent_sleep`
+    #     topic name is also accepted and routes through the same handler.
+    #
+    # Three topic flavors for fleet targeting:
+    #   • apollo/temp-pro-1/command/power_source         → all devices
+    #   • apollo/temp-pro-1/battery/command/power_source → battery devices only
+    #   • apollo/temp-pro-1/wired/command/power_source   → wired devices only
+    # Plus the legacy `prevent_sleep` topic on the same three flavors.
+    # ============================================================
+    - topic: apollo/temp-pro-1/command/power_source
+      then:
+        - lambda: |-
+            std::string mode;
+            if (x == "wired" || x == "ON" || x == "on" || x == "1" || x == "true") {
+              mode = "wired";
+            } else if (x == "battery" || x == "OFF" || x == "off" || x == "0" || x == "false") {
+              mode = "battery";
+            } else {
+              ESP_LOGW("Apollo", "Unknown power_source payload: %s", x.c_str());
+              return;
+            }
+            auto call = id(power_source).make_call();
+            call.set_option(mode);
+            call.perform();
+
+    - topic: apollo/temp-pro-1/battery/command/power_source
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).state == "battery";'
+            then:
+              - lambda: |-
+                  std::string mode;
+                  if (x == "wired" || x == "ON") mode = "wired";
+                  else if (x == "battery" || x == "OFF") mode = "battery";
+                  else return;
+                  auto call = id(power_source).make_call();
+                  call.set_option(mode);
+                  call.perform();
+
+    - topic: apollo/temp-pro-1/wired/command/power_source
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).state == "wired";'
+            then:
+              - lambda: |-
+                  std::string mode;
+                  if (x == "wired" || x == "ON") mode = "wired";
+                  else if (x == "battery" || x == "OFF") mode = "battery";
+                  else return;
+                  auto call = id(power_source).make_call();
+                  call.set_option(mode);
+                  call.perform();
+
+    # Legacy prevent_sleep topics — same effect, routed to power_source.
+    # ON  → wired, OFF → battery. Kept for backward compatibility with any
+    # operator scripts or Ignition tag bindings that still publish here.
     - topic: apollo/temp-pro-1/command/prevent_sleep
       then:
         - lambda: |-
-            if (x == "ON" || x == "on" || x == "1" || x == "true") {
-              id(prevent_sleep).turn_on();
-            } else {
-              id(prevent_sleep).turn_off();
-            }
+            std::string mode = (x == "ON" || x == "on" || x == "1" || x == "true") ? "wired" : "battery";
+            auto call = id(power_source).make_call();
+            call.set_option(mode);
+            call.perform();
+
+    - topic: apollo/temp-pro-1/battery/command/prevent_sleep
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).state == "battery";'
+            then:
+              - lambda: |-
+                  std::string mode = (x == "ON" || x == "on") ? "wired" : "battery";
+                  auto call = id(power_source).make_call();
+                  call.set_option(mode);
+                  call.perform();
+
+    - topic: apollo/temp-pro-1/wired/command/prevent_sleep
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).state == "wired";'
+            then:
+              - lambda: |-
+                  std::string mode = (x == "ON" || x == "on") ? "wired" : "battery";
+                  auto call = id(power_source).make_call();
+                  call.set_option(mode);
+                  call.perform();
 
     # RGB Light ON - turns on white at full brightness
     - topic: apollo/temp-pro-1/command/light/on
@@ -358,7 +481,10 @@ mqtt:
             call.perform();
             ESP_LOGI("Apollo", "Light effect set to: %s", effect.c_str());
 
-    # Sleep duration control - payload: minutes (e.g., "30", "2", "60")
+    # Sleep duration control — payload: minutes (e.g., "30", "2", "60").
+    # Three class-scoped flavors (broadcast / battery / wired). Wired devices
+    # ignore this in practice (they don't sleep) but they accept it for
+    # operational consistency.
     - topic: apollo/temp-pro-1/command/sleep_duration
       then:
         - lambda: |-
@@ -369,6 +495,32 @@ mqtt:
             } else {
               ESP_LOGW("Apollo", "Invalid sleep duration: %.2f (must be 1-1440 minutes)", minutes);
             }
+
+    - topic: apollo/temp-pro-1/battery/command/sleep_duration
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).state == "battery";'
+            then:
+              - lambda: |-
+                  float minutes = atof(x.c_str());
+                  if (minutes >= 1 && minutes <= 1440) {
+                    id(deep_sleep_sleep_duration).publish_state(minutes);
+                    ESP_LOGI("Apollo", "battery-class sleep_duration: %.0f min", minutes);
+                  }
+
+    - topic: apollo/temp-pro-1/wired/command/sleep_duration
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).state == "wired";'
+            then:
+              - lambda: |-
+                  float minutes = atof(x.c_str());
+                  if (minutes >= 1 && minutes <= 1440) {
+                    id(deep_sleep_sleep_duration).publish_state(minutes);
+                    ESP_LOGI("Apollo", "wired-class sleep_duration: %.0f min", minutes);
+                  }
 
     # Buzzer test - payload: RTTTL string or preset name (beep, siren, success, error)
     - topic: apollo/temp-pro-1/command/buzzer
@@ -570,15 +722,20 @@ button:
       - script.execute: publish_mqtt_data
 
   # Diagnostic: end the current wake session immediately and enter deep sleep.
-  # Works whether prevent_sleep is ON or OFF.
+  # Flips power_source to "battery" first, so wired devices honor this too.
   - platform: template
     name: "Force Sleep"
     id: button_force_sleep
     icon: mdi:power-sleep
     entity_category: "diagnostic"
     on_press:
-      - lambda: 'ESP_LOGW("Apollo", "Force Sleep triggered via web UI");'
-      - switch.turn_off: prevent_sleep
+      - lambda: |-
+          ESP_LOGW("Apollo", "Force Sleep triggered via web UI");
+          if (id(power_source).state != "battery") {
+            auto call = id(power_source).make_call();
+            call.set_option("battery");
+            call.perform();
+          }
       - script.execute: prepare_and_sleep
 
   # Maintenance: trigger SEN55 forced fan cleaning (~10s of fan boost to clear dust).

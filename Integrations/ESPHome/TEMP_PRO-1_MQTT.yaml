@@ -61,6 +61,33 @@ mqtt:
   on_connect:
     then:
       - logger.log: "Connected to MQTT broker"
+      # ---------------------------------------------------------------------
+      # Self-heal scrub: clear retained command messages at the broker on
+      # every successful connect. See ETH variant for full rationale.
+      # ---------------------------------------------------------------------
+      - lambda: |-
+          auto clear = [](const char* topic) {
+            id(mqtt_client).publish(topic, "", 0, 0, true);
+          };
+          // Broadcast command topics
+          clear("apollo/temp-pro-1/command/prevent_sleep");
+          clear("apollo/temp-pro-1/command/sleep_duration");
+          clear("apollo/temp-pro-1/command/restart");
+          clear("apollo/temp-pro-1/command/light/on");
+          clear("apollo/temp-pro-1/command/light/off");
+          clear("apollo/temp-pro-1/command/light/red");
+          clear("apollo/temp-pro-1/command/light/green");
+          clear("apollo/temp-pro-1/command/light/blue");
+          clear("apollo/temp-pro-1/command/light/rgb");
+          clear("apollo/temp-pro-1/command/light/effect");
+          clear("apollo/temp-pro-1/command/buzzer");
+          clear("apollo/temp-pro-1/command/buzzer/stop");
+          // Class-scoped command topics
+          clear("apollo/temp-pro-1/battery/command/prevent_sleep");
+          clear("apollo/temp-pro-1/battery/command/sleep_duration");
+          clear("apollo/temp-pro-1/wired/command/prevent_sleep");
+          clear("apollo/temp-pro-1/wired/command/sleep_duration");
+          ESP_LOGI("Apollo", "Cleared retained command topics at broker");
       - if:
           condition:
             switch.is_on: prevent_sleep
@@ -153,7 +180,10 @@ mqtt:
         - logger.log: "Restart command received via MQTT"
         - button.press: esp_reboot
 
-    # Prevent sleep control
+    # ============================================================
+    # Prevent-sleep command — three flavors for fleet targeting.
+    # See ETH variant for full rationale.
+    # ============================================================
     - topic: apollo/temp-pro-1/command/prevent_sleep
       then:
         - lambda: |-
@@ -162,6 +192,32 @@ mqtt:
             } else {
               id(prevent_sleep).turn_off();
             }
+
+    - topic: apollo/temp-pro-1/battery/command/prevent_sleep
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).state == "battery";'
+            then:
+              - lambda: |-
+                  if (x == "ON" || x == "on" || x == "1" || x == "true") {
+                    id(prevent_sleep).turn_on();
+                  } else {
+                    id(prevent_sleep).turn_off();
+                  }
+
+    - topic: apollo/temp-pro-1/wired/command/prevent_sleep
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).state == "wired";'
+            then:
+              - lambda: |-
+                  if (x == "ON" || x == "on" || x == "1" || x == "true") {
+                    id(prevent_sleep).turn_on();
+                  } else {
+                    id(prevent_sleep).turn_off();
+                  }
 
     # RGB Light ON - turns on white at full brightness
     - topic: apollo/temp-pro-1/command/light/on

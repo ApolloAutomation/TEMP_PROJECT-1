@@ -42,6 +42,47 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  # Drain-rate detector state (NVS-restored, survives deep sleep).
+  # On every wake we read current battery %, compare against the value saved at
+  # last wake, divide by elapsed minutes (boot delta × sleep duration), and if
+  # the implied %/hour rate exceeds the configured threshold we force a long
+  # emergency sleep instead of normal operation. -1 = no prior reading.
+  - id: battery_pct_at_last_wake
+    type: float
+    restore_value: true
+    initial_value: '-1.0f'
+  - id: last_wake_boot_count
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  # Set true when the drain detector trips this wake — published to MQTT as a
+  # status flag so operators can see which devices recovered the hard way.
+  - id: drain_protection_triggered
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # millis() stamp of when the drain baseline was set in THIS run-since-boot.
+  # Used for elapsed-time calculation on WIRED devices (which don't sleep, so
+  # boot_count doesn't increment between drain checks). 0 = "haven't set
+  # baseline since reboot yet" — triggers a baseline reset on first call.
+  # Battery devices ignore this field and use boot_count delta instead.
+  - id: baseline_set_at_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # Lifetime count of drain-alarm trips (NVS). Lets operators tell at a glance
+  # whether a device has had a history of trouble vs a fresh deployment.
+  - id: drain_trigger_count
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  # boot_count snapshot at the most recent drain-alarm trip (NVS). Combined with
+  # current boot_count and sleep_duration, this estimates how long ago it was.
+  # 0 = never tripped.
+  - id: drain_last_trigger_boot
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
 
 # mDNS lets field techs reach the device at http://apollo-tmp-pro-1-mqtte-<mac6>.local/
 # Only active while the device is awake; no impact on deep sleep power.
@@ -99,7 +140,11 @@ binary_sensor:
     id: reset_button
     internal: true
     on_multi_click:
-      # Triple click - toggle prevent sleep
+      # Triple click - toggle power source (battery <-> wired).
+      # Solid RED 3s = WIRED (stays awake / "STOP - no sleep")
+      # Solid GREEN 3s = BATTERY (will sleep / "GO to sleep")
+      # This is the ONLY power-mode toggle on the device — replaces the old
+      # separate prevent_sleep + power_source pair.
       - timing:
           - ON for at most 0.5s
           - OFF for at most 0.5s
@@ -109,16 +154,18 @@ binary_sensor:
           - OFF for at least 0.3s
         then:
           - lambda: |-
-              if (id(prevent_sleep).state) {
-                id(prevent_sleep).turn_off();
-                ESP_LOGW("Apollo", "Prevent Sleep DISABLED via 3x button press");
+              auto call = id(power_source).make_call();
+              if (id(power_source).state == "wired") {
+                call.set_option("battery");
+                ESP_LOGW("Apollo", "Power source set to BATTERY via 3x button press");
               } else {
-                id(prevent_sleep).turn_on();
-                ESP_LOGW("Apollo", "Prevent Sleep ENABLED via 3x button press");
+                call.set_option("wired");
+                ESP_LOGW("Apollo", "Power source set to WIRED via 3x button press");
               }
+              call.perform();
           - if:
               condition:
-                switch.is_on: prevent_sleep
+                lambda: 'return id(power_source).state == "wired";'
               then:
                 - light.turn_on:
                     id: rgb_light
@@ -149,6 +196,15 @@ binary_sensor:
           - OFF for at least 0.5s
         then:
           - script.execute: statusCheck
+
+  # Live flag — TRUE during the wake when the drain detector fired.
+  # Resets to FALSE on every boot (drain_protection_triggered global is non-restored).
+  - platform: template
+    name: "Drain Alarm Triggered (this wake)"
+    id: drain_alarm_binary
+    icon: mdi:battery-alert-variant-outline
+    entity_category: diagnostic
+    lambda: 'return id(drain_protection_triggered);'
 
 sensor:
   - platform: sen5x
@@ -282,6 +338,18 @@ sensor:
             if (x > 100) return 100;
             else return (x);
 
+  # Lifetime count of drain-alarm trips, NVS-backed. Visible in the web UI
+  # under Diagnostic, and pushed to MQTT (meta/drain_trigger_count) so a
+  # single subscription can inventory which devices have a history of trouble.
+  - platform: template
+    name: "Drain Trigger Count"
+    id: drain_trigger_count_sensor
+    icon: mdi:counter
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float)id(drain_trigger_count);'
+
 light:
   - platform: esp32_rmt_led_strip
     id: rgb_light
@@ -339,6 +407,53 @@ number:
     icon: "mdi:timer-alert"
     entity_category: CONFIG
     unit_of_measurement: "s"
+
+  # Drain-rate alarm. Two thresholds work together — both must trip for the
+  # alarm to fire, which keeps MAX17048 noise (~1-2% per reading) from causing
+  # false positives.
+  #
+  # Reference rates on this hardware:
+  #   - Battery, sleeping with brief wakes: ~0.1 %/h  (well under any threshold)
+  #   - Battery, stuck awake at 200mA:      ~2.5-4 %/h
+  #   - Wired, lost PoE/USB at 250mA:       ~3-4 %/h
+  #
+  # Default 3 %/h catches the bottom of those failure ranges with margin.
+  # Set 0 to disable the alarm entirely.
+  - platform: template
+    name: "Drain Alarm Threshold"
+    id: drain_threshold_pct_per_hour
+    min_value: 0
+    max_value: 50
+    step: 0.5
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 3.0
+    icon: "mdi:battery-alert"
+    entity_category: CONFIG
+    unit_of_measurement: "%/h"
+
+  # Minimum cumulative drop (vs the highest recently-observed battery %) before
+  # the alarm can fire. The MAX17048 reports 1-2% jitter on consecutive reads
+  # (e.g. wired device idling at 100% might read 98-100%); requiring at least
+  # this much *sustained* drop before alarming filters that noise out. Together
+  # with the rate threshold above, a real drain has to look real on both axes.
+  # Default 3% gives ~1.5x the typical noise floor.
+  - platform: template
+    name: "Drain Alarm Min Drop"
+    id: drain_min_drop_pct
+    min_value: 0
+    max_value: 20
+    step: 0.5
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 3.0
+    icon: "mdi:battery-minus-variant"
+    entity_category: CONFIG
+    unit_of_measurement: "%"
 
   # How often to publish MQTT data while Prevent Sleep is ON.
   # Default 10s. Increase for reduced chatter or decrease for faster live debugging.
@@ -435,58 +550,77 @@ switch:
     on_turn_off:
       - lambda: 'ESP_LOGW("Apollo", "DHCP will be used on next reboot. Reboot now to activate.");'
 
-  - platform: template
-    name: "Prevent Sleep"
-    id: prevent_sleep
-    icon: mdi:sleep
-    restore_mode: ALWAYS_OFF
-    optimistic: true
-    entity_category: "config"
-    on_turn_on:
-      then:
-        - lambda: |-
-            id(deep_sleep_1).prevent_deep_sleep();
-    on_turn_off:
-      then:
-        - lambda: |-
-            id(deep_sleep_1).allow_deep_sleep();
+  # NOTE: the old `prevent_sleep` switch was merged into the `power_source`
+  # select (battery=sleeps, wired=stays awake). Both were doing the same job.
 
 interval:
-  # Safety net: if prevent_sleep is OFF and device has been awake > max_wake_time_s, force sleep.
-  # Timeout is configurable via the "Max Wake Time" number in the web server.
+  # Battery-device wake-time enforcer. Single rule: if `power_source == battery`
+  # and the device has been awake longer than `max_wake_time_s`, force sleep.
+  # Runs unconditionally — doesn't matter whether MQTT connected, whether the
+  # publish completed, etc. The hard cap is the cap. Wired devices skip this.
+  #
+  # Why this is enough on its own:
+  #   - Healthy wake: on_connect finishes well before max_wake_time_s and calls
+  #     prepare_and_sleep itself; this interval never fires.
+  #   - MQTT-failed wake: on_connect never reaches the sleep call → this interval
+  #     fires at max_wake_time_s and forces sleep.
+  #   - Accidentally flipped to wired then back: same as healthy.
+  #   - Operator put device in "wired" for diagnostics: skipped, stays awake.
+  #     Drain detector (in check_battery_drain) flips it back to battery if the
+  #     battery starts dropping faster than the configured threshold.
   - interval: 5s
     startup_delay: 10s
     then:
       - if:
           condition:
             and:
-              - switch.is_off: prevent_sleep
+              - lambda: 'return id(power_source).state == "battery";'
               - lambda: 'return !id(alarm_triggered_on_wake);'
               - lambda: 'return millis() >= (uint32_t)(id(max_wake_time_s).state * 1000);'
           then:
             - lambda: |-
-                ESP_LOGW("Apollo", "Safety net: MQTT never connected — logging sensor state before sleep");
-            # Run publish script so the diagnostic summary log fires even when MQTT is down.
-            # The queued publishes fail silently if disconnected — broker just won't receive them.
+                ESP_LOGW("Apollo", "Wake-time cap (%us) reached — sleeping",
+                         (unsigned)id(max_wake_time_s).state);
+            # Publish runs even when disconnected — queued publishes fail silently.
             - script.execute: publish_mqtt_data
             - delay: 200ms
             - script.execute: prepare_and_sleep
 
-  # Publish MQTT data periodically when prevent_sleep is ON.
-  # Interval is configurable via "Publish Interval" number (default 10s).
+  # Periodic MQTT publish for wired devices (which never sleep).
+  # Battery devices publish exactly once per wake from on_connect; this loop is
+  # only meaningful when the device stays awake long enough to publish more
+  # than once. Interval is configurable via "Publish Interval" number.
   - interval: 1s
     startup_delay: 30s
     then:
       - if:
           condition:
             and:
-              - switch.is_on: prevent_sleep
+              - lambda: 'return id(power_source).state == "wired";'
               - lambda: |-
                   uint32_t need_ms = (uint32_t)(id(prevent_sleep_publish_interval_s).state * 1000);
                   return (millis() - id(last_prevent_sleep_publish_ms)) >= need_ms;
           then:
             - lambda: 'id(last_prevent_sleep_publish_ms) = millis();'
             - script.execute: publish_mqtt_data
+
+  # Periodic drain-check for wired devices. Battery devices run the drain
+  # detector every wake via on_connect; wired devices need this interval
+  # because their on_connect runs only once per boot. Cadence is 30 min to
+  # match the script's internal min-window — running more often wouldn't
+  # produce earlier alarms (the script would just exit on min-window).
+  # Startup delay of 5 min lets the initial post-boot baseline settle before
+  # the first periodic check runs.
+  - interval: 30min
+    startup_delay: 5min
+    then:
+      - if:
+          condition:
+            lambda: 'return id(power_source).state == "wired";'
+          then:
+            - component.update: max_17048
+            - delay: 1s
+            - script.execute: check_battery_drain
 
 script:
   # Publish all MQTT data once (called from on_connect)
@@ -601,9 +735,39 @@ script:
           snprintf(topic, sizeof(topic), "%s/meta/unit_humidity", prefix);
           id(mqtt_client).publish(topic, unit_rh, strlen(unit_rh), 0, true);
 
-          const char* sleep_mode = id(prevent_sleep).state ? "OFF" : "ON";
+          // sleep_mode is derived from power_source for backward compatibility
+          // with subscribers that watch this topic. battery → "ON" (will sleep),
+          // wired → "OFF" (won't sleep). New deployments should subscribe to
+          // meta/power_source instead.
+          const char* sleep_mode = (id(power_source).state == "wired") ? "OFF" : "ON";
           snprintf(topic, sizeof(topic), "%s/meta/sleep_mode", prefix);
           id(mqtt_client).publish(topic, sleep_mode, strlen(sleep_mode), 0, true);
+
+          // Power source — "battery" or "wired". The single source of truth
+          // for sleep behavior; replaced the old separate prevent_sleep switch.
+          std::string power_src = id(power_source).state;
+          snprintf(topic, sizeof(topic), "%s/meta/power_source", prefix);
+          id(mqtt_client).publish(topic, power_src.c_str(), power_src.length(), 0, true);
+
+          // Drain-protection status: "TRIGGERED" if the rate alarm fired this wake,
+          // else "OK". Operators should investigate any device reporting TRIGGERED —
+          // the device just escaped fast battery drain by flipping to battery mode.
+          const char* drain_status = id(drain_protection_triggered) ? "TRIGGERED" : "OK";
+          snprintf(topic, sizeof(topic), "%s/status/drain_protection", prefix);
+          id(mqtt_client).publish(topic, drain_status, strlen(drain_status), 0, true);
+
+          // Lifetime drain trigger count + boot stamp of the last trip. Lets
+          // operators inventory devices with a history of trouble:
+          //   mosquitto_sub -t '+/meta/drain_trigger_count'  → list of counts
+          char drain_count_buf[24];
+          snprintf(drain_count_buf, sizeof(drain_count_buf), "%u", (unsigned)id(drain_trigger_count));
+          snprintf(topic, sizeof(topic), "%s/meta/drain_trigger_count", prefix);
+          id(mqtt_client).publish(topic, drain_count_buf, strlen(drain_count_buf), 0, true);
+
+          char drain_last_buf[24];
+          snprintf(drain_last_buf, sizeof(drain_last_buf), "%u", (unsigned)id(drain_last_trigger_boot));
+          snprintf(topic, sizeof(topic), "%s/meta/drain_last_trigger_boot", prefix);
+          id(mqtt_client).publish(topic, drain_last_buf, strlen(drain_last_buf), 0, true);
 
           // --- Diagnostic metadata (firmware, counters, health) ---
           const char* fw_ver = "${version}";
@@ -689,6 +853,19 @@ script:
                    temp_f, rh_pct,
                    (temp_f < 0 || rh_pct < 0) ? "[SHT3x failing]" : "");
           ESP_LOGW("Apollo", "  Topics: %s/sensor/...", prefix);
+          // Drain protection summary — always logged so it's grep-able in
+          // captured logs even when the device is healthy.
+          if (id(drain_protection_triggered)) {
+            ESP_LOGE("Apollo", "  Drain Alarm: TRIGGERED THIS WAKE (lifetime count: %u)",
+                     (unsigned)id(drain_trigger_count));
+          } else if (id(drain_trigger_count) > 0) {
+            ESP_LOGW("Apollo", "  Drain Alarm: OK now — %u prior trip%s, last at boot #%u",
+                     (unsigned)id(drain_trigger_count),
+                     id(drain_trigger_count) == 1 ? "" : "s",
+                     (unsigned)id(drain_last_trigger_boot));
+          } else {
+            ESP_LOGW("Apollo", "  Drain Alarm: OK (no prior trips)");
+          }
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGI("Apollo", "All MQTT data published");
 
@@ -731,6 +908,129 @@ script:
           ESP_LOGW("Apollo", "SEN55 Serial: %s | Firmware: %s",
                    id(sen55_serial).c_str(), id(sen55_fw).c_str());
 
+  # Drain-rate detector. Called from:
+  #   - on_connect (every wake for battery devices; once at boot for wired)
+  #   - drain_check periodic interval below (every 30 min for wired devices)
+  #
+  # ---- How the baseline works ----
+  # `battery_pct_at_last_wake` is the highest battery % we've seen recently —
+  # NOT the previous wake's value. It only updates when:
+  #   1. Initial setup (first ever boot, or NVS reset, or first call after a
+  #      wired device's cold reboot — see baseline_set_at_ms below)
+  #   2. Battery rises ≥5% above baseline (charging detected)
+  #   3. Alarm fires (so the next call doesn't immediately re-alarm)
+  #
+  # Per-call noise (1-2% jitter from MAX17048) does NOT update the baseline.
+  # This means slow drains accumulate against a stable reference — a wired
+  # device dropping 1%/h still trips after a few hours, even though no
+  # individual reading would look out of bounds.
+  #
+  # ---- Elapsed-time calculation differs by power source ----
+  # BATTERY devices: each wake increments boot_count; sleep_duration is the
+  #   minutes per cycle. total_minutes = boots_elapsed × sleep_duration.
+  #   (millis() resets every wake, so it can't be used.)
+  # WIRED devices: device stays awake; boot_count doesn't increment between
+  #   drain checks; millis() keeps growing. total_minutes from millis delta.
+  #   Cross-reboot caveat: baseline % is NVS-restored but baseline_set_at_ms
+  #   is not (millis() is meaningless across reboots). On first call after
+  #   a wired reboot we detect this (baseline_set_at_ms == 0) and reset.
+  #
+  # ---- Why two thresholds (rate AND min-drop) ----
+  # Either alone has a hole:
+  #   - rate-only is fooled by a single noisy reading (98 → 96 in 30min = 4%/h)
+  #   - drop-only is fooled by gradual battery aging (10% over a year)
+  # Both together require BOTH "real magnitude" (≥ min_drop) AND "real speed"
+  # (≥ rate threshold). A real fault produces both; noise/aging produces neither.
+  - id: check_battery_drain
+    then:
+      - lambda: |-
+          // Skip when alarm disabled or battery reading invalid.
+          if (id(drain_threshold_pct_per_hour).state <= 0.0f) return;
+          float current = id(batt_pct).state;
+          if (std::isnan(current) || current < 0.0f || current > 100.0f) return;
+
+          bool is_wired = (id(power_source).state == "wired");
+          float baseline = id(battery_pct_at_last_wake);
+
+          // Helper: stamp a fresh baseline (value + boot count + millis).
+          auto set_baseline = [&](const char* reason) {
+            id(battery_pct_at_last_wake) = current;
+            id(last_wake_boot_count) = id(boot_count);
+            uint32_t now = millis();
+            id(baseline_set_at_ms) = (now == 0) ? 1 : now;
+            ESP_LOGI("Apollo", "Drain baseline %s to %.1f%% (boot %u, millis %u)",
+                     reason, current, (unsigned)id(boot_count), (unsigned)now);
+          };
+
+          // Case 1: first boot ever, no baseline yet.
+          if (baseline < 0.0f) { set_baseline("initialized"); return; }
+
+          // Case 2: WIRED device, first call since reboot. The NVS-restored
+          // baseline is from a prior boot session; millis() is meaningless
+          // across reboots. Reset baseline to current (we lose pre-reboot
+          // history but avoid wildly-wrong rate calculations).
+          if (is_wired && id(baseline_set_at_ms) == 0) {
+            set_baseline("reset (wired reboot)");
+            return;
+          }
+
+          // Case 3: battery rose ≥5% above baseline → charging detected.
+          if (current >= baseline + 5.0f) {
+            set_baseline("reset (charging detected)");
+            return;
+          }
+
+          // ---- Compute elapsed time since baseline was set ----
+          float total_minutes;
+          if (is_wired) {
+            uint32_t now = millis();
+            uint32_t baseline_ms = id(baseline_set_at_ms);
+            uint32_t delta_ms = now - baseline_ms;  // unsigned subtract handles wraparound
+            total_minutes = delta_ms / 60000.0f;
+          } else {
+            uint32_t boots_elapsed = id(boot_count) - id(last_wake_boot_count);
+            total_minutes = (float)boots_elapsed * id(deep_sleep_sleep_duration).state;
+          }
+
+          // Need ≥30 min of elapsed time before the rate calculation is
+          // statistically meaningful. Below that, exit (baseline persists).
+          if (total_minutes < 30.0f) {
+            ESP_LOGI("Apollo", "Drain check: window too short (%.0f min, need ≥30) — holding baseline", total_minutes);
+            return;
+          }
+
+          // Drop = how far we've fallen from baseline. Negative = noise spike
+          // up but under the 5% rise threshold; just exit.
+          float drop = baseline - current;
+          if (drop <= 0.0f) {
+            ESP_LOGI("Apollo", "Drain check: no drop (baseline %.1f → current %.1f over %.0f min)", baseline, current, total_minutes);
+            return;
+          }
+
+          float rate = drop * (60.0f / total_minutes);
+          float min_drop = id(drain_min_drop_pct).state;
+          float rate_thr = id(drain_threshold_pct_per_hour).state;
+
+          ESP_LOGI("Apollo", "Drain check [%s]: %.1f%% over %.0f min = %.2f%%/h (floors: %.1f%%, %.1f%%/h)",
+                   is_wired ? "wired" : "battery", drop, total_minutes, rate, min_drop, rate_thr);
+
+          // Alarm fires only when BOTH conditions trip.
+          if (drop >= min_drop && rate >= rate_thr) {
+            id(drain_protection_triggered) = true;
+            id(drain_trigger_count) += 1;
+            id(drain_last_trigger_boot) = id(boot_count);
+            ESP_LOGE("Apollo", "DRAIN ALARM #%u: %.1f%% drop / %.2f%%/h rate exceeds floors (%.1f%%, %.1f%%/h) — flipping to battery mode",
+                     (unsigned)id(drain_trigger_count),
+                     drop, rate, min_drop, rate_thr);
+            if (id(power_source).state != "battery") {
+              auto call = id(power_source).make_call();
+              call.set_option("battery");
+              call.perform();
+            }
+            // Reset baseline so we don't immediately re-alarm next call.
+            set_baseline("reset (alarm fired)");
+          }
+
   # Consolidated sleep entry — all sleep paths call this script.
   # NOTE: accessory_power off + GPIO7 hold live in on_shutdown (device file),
   # NOT here. Cutting power to the W5500 before ethernet has cleanly torn down
@@ -750,6 +1050,38 @@ script:
           id: deep_sleep_1
 
 select:
+  # The single source of truth for sleep behavior. Replaces the old separate
+  # `prevent_sleep` switch — they were doing the same job under two names.
+  #
+  #   battery → device sleeps. Wakes on schedule (sleep_duration), connects,
+  #             publishes, sleeps again. If MQTT/sensors take too long, the
+  #             safety-net interval forces sleep at max_wake_time_s.
+  #   wired   → device never sleeps. Calls prevent_deep_sleep() so the
+  #             deep_sleep component stays inactive. Use this for USB/PoE
+  #             units, or temporarily for live diagnostics on a battery unit.
+  #
+  # Toggle via web UI, MQTT, or the 3x boot-button press.
+  - platform: template
+    name: "Power Source"
+    id: power_source
+    icon: mdi:power-plug
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_option: "battery"
+    options:
+      - "battery"
+      - "wired"
+    on_value:
+      - lambda: |-
+          if (x == "wired") {
+            id(deep_sleep_1).prevent_deep_sleep();
+            ESP_LOGW("Apollo", "Power source = WIRED — deep sleep prevented, device will stay awake");
+          } else {
+            id(deep_sleep_1).allow_deep_sleep();
+            ESP_LOGW("Apollo", "Power source = BATTERY — deep sleep enabled, will sleep within max_wake_time_s");
+          }
+
   - platform: template
     name: "Column ID"
     id: column_id
@@ -1244,6 +1576,27 @@ text:
     mode: text
 
 text_sensor:
+
+  # Human-readable summary of the most recent drain-alarm trip.
+  # "Never" when drain_last_trigger_boot == 0 (fresh device or NVS reset).
+  # Otherwise: which boot it tripped on, and how many wakes ago that was.
+  - platform: template
+    name: "Last Drain Trigger"
+    id: last_drain_trigger_text
+    icon: mdi:history
+    entity_category: diagnostic
+    update_interval: 30s
+    lambda: |-
+      if (id(drain_last_trigger_boot) == 0) {
+        return std::string("Never");
+      }
+      char buf[64];
+      uint32_t boots_ago = id(boot_count) - id(drain_last_trigger_boot);
+      snprintf(buf, sizeof(buf), "Boot #%u (%u wake%s ago)",
+               (unsigned)id(drain_last_trigger_boot),
+               (unsigned)boots_ago,
+               boots_ago == 1 ? "" : "s");
+      return std::string(buf);
 
   # Human-readable current-session uptime (resets to 0 on each wake from deep sleep).
   # Most useful when Prevent Sleep is ON to watch how long you've been in debug mode.
