@@ -784,9 +784,24 @@ interval:
               - lambda: 'return millis() >= (uint32_t)(id(max_wake_time_s).state * 1000);'
           then:
             - lambda: |-
-                ESP_LOGW("Apollo", "Wake-time cap (%us) reached — sleeping",
+                ESP_LOGW("Apollo", "Wake-time cap (%us) reached — forcing sensor read + log + sleep",
                          (unsigned)id(max_wake_time_s).state);
-            # Publish runs even when disconnected — queued publishes fail silently.
+            # Force a fresh sensor read so the diagnostic log + queued publishes
+            # have current values. Without this, the wake might end before the
+            # passive update_interval has fired and the log shows stale data.
+            # Each [D][sensor:...] line you see here comes from this update.
+            - component.update: sen55
+            - component.update: sht3xd_sensor
+            - component.update: max_17048
+            - delay: 1s
+            # Run the same safety scripts the on_connect path does, so
+            # offline wakes still maintain drain detection, sensor health
+            # tracking, and critical-battery sleep extension.
+            - script.execute: track_sensor_health
+            - script.execute: check_critical_battery
+            - script.execute: check_battery_drain
+            # Publish runs even when disconnected — queued publishes fail silently
+            # but the boxed diagnostic summary log fires either way.
             - script.execute: publish_mqtt_data
             - delay: 200ms
             - script.execute: prepare_and_sleep
@@ -1150,6 +1165,17 @@ script:
             ESP_LOGW("Apollo", "  Battery:     %d%% (voltage N/A)", batt);
           }
           ESP_LOGW("Apollo", "  Free Heap:   %u KB", (unsigned)free_heap_kb);
+          // ESP32 internal die temperature — flags thermal issues during
+          // long wake cycles or in hot environments.
+          if (!std::isnan(id(esp_internal_temp).state)) {
+            ESP_LOGW("Apollo", "  ESP Temp:    %.1f °F", id(esp_internal_temp).state);
+          }
+          // Lifetime battery min/max — only logged if a real value has been
+          // recorded (sentinels mean "never observed").
+          if (id(lifetime_min_battery_pct) <= 100.0f && id(lifetime_max_battery_pct) >= 0.0f) {
+            ESP_LOGW("Apollo", "  Batt Range:  %.1f%% .. %.1f%% (lifetime)",
+                     id(lifetime_min_battery_pct), id(lifetime_max_battery_pct));
+          }
           ESP_LOGW("Apollo", "  SEN55:       Serial %s, FW %s", sen55_ser, sen55_fwver);
           if (status_ok) {
             ESP_LOGW("Apollo", "  SEN55 Stat:  0x%08X %s", (unsigned int)sen55_status,
