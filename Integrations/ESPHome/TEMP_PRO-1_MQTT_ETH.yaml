@@ -86,6 +86,31 @@ esphome:
               }
             }
 
+            // ----- LWT and birth message (per-device) -----
+            // Set programmatically because the YAML birth_message/will_message
+            // can't reach the runtime device name (which has the MAC suffix).
+            // App.get_name() returns e.g. "apollo-tmp-pro-1-mqtte-a1b2c3", giving
+            // each unit a unique online/offline topic the broker can manage on
+            // ungraceful disconnect.
+            {
+              std::string online_topic = std::string("apollo/temp-pro-1/") + App.get_name() + "/meta/online";
+              esphome::mqtt::MQTTMessage will;
+              will.topic = online_topic;
+              will.payload = "false";
+              will.qos = 1;
+              will.retain = true;
+              id(mqtt_client)->set_last_will(std::move(will));
+
+              esphome::mqtt::MQTTMessage birth;
+              birth.topic = online_topic;
+              birth.payload = "true";
+              birth.qos = 1;
+              birth.retain = true;
+              id(mqtt_client)->set_birth_message(std::move(birth));
+
+              ESP_LOGW("Apollo", "LWT/birth configured for: %s", online_topic.c_str());
+            }
+
     # After ethernet netif is created (priority ~250) but before app loop (priority -100),
     # apply static IP if the user has enabled it via the web UI.
     - priority: 200
@@ -232,26 +257,10 @@ mqtt:
   topic_prefix: null
   discovery: false
 
-  # ----- Firmware-side Last Will & Testament (LWT) -----
-  # On every successful connect, the broker stores will_message and the
-  # firmware publishes birth_message. If the connection drops ungracefully
-  # (network outage, power loss, crash), the broker auto-publishes
-  # will_message — letting subscribers tell "device offline" from "device
-  # sleeping but alive."
-  #
-  # ${devicename} resolves at compile time to the device name (which has the
-  # MAC suffix appended via name_add_mac_suffix: true), giving a per-device
-  # online/offline topic without needing broker-side configuration.
-  birth_message:
-    topic: apollo/temp-pro-1/${devicename}/meta/online
-    payload: "true"
-    retain: true
-    qos: 1
-  will_message:
-    topic: apollo/temp-pro-1/${devicename}/meta/online
-    payload: "false"
-    retain: true
-    qos: 1
+  # NOTE: birth_message and will_message are set programmatically in on_boot
+  # priority 600 (see below). The YAML versions can't use the runtime device
+  # name (which includes the MAC suffix from name_add_mac_suffix: true), so
+  # we configure them via the C++ API in a lambda before MQTT connects.
 
   on_connect:
     then:
