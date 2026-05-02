@@ -153,6 +153,13 @@ esphome:
             ESP_LOGW("Apollo", "Boot count: %u", (unsigned)id(boot_count));
             // Sleep duration number is in MINUTES
             id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 1000);
+        # Capture WHY this wake happened (timer/button/cold_boot) — published
+        # as meta/wake_reason and shown in the diagnostic summary log.
+        - script.execute: capture_wake_reason
+        # Detect rapid-boot loops (gap between boots ≪ sleep_duration). If
+        # ≥3 in a row, the script forces a 30-min cooldown via
+        # boot_loop_force_sleep flag, which on_connect honors.
+        - script.execute: check_boot_loop
         - if:
             condition:
               lambda: 'return id(power_source).state == "wired";'
@@ -225,9 +232,42 @@ mqtt:
   topic_prefix: null
   discovery: false
 
+  # ----- Firmware-side Last Will & Testament (LWT) -----
+  # On every successful connect, the broker stores will_message and the
+  # firmware publishes birth_message. If the connection drops ungracefully
+  # (network outage, power loss, crash), the broker auto-publishes
+  # will_message — letting subscribers tell "device offline" from "device
+  # sleeping but alive."
+  #
+  # ${devicename} resolves at compile time to the device name (which has the
+  # MAC suffix appended via name_add_mac_suffix: true), giving a per-device
+  # online/offline topic without needing broker-side configuration.
+  birth_message:
+    topic: apollo/temp-pro-1/${devicename}/meta/online
+    payload: "true"
+    retain: true
+    qos: 1
+  will_message:
+    topic: apollo/temp-pro-1/${devicename}/meta/online
+    payload: "false"
+    retain: true
+    qos: 1
+
   on_connect:
     then:
       - logger.log: "Connected to MQTT broker"
+      # Boot-loop cooldown: if check_boot_loop set this flag in on_boot, skip
+      # everything and head straight to sleep. The 30-min sleep gives whatever
+      # is causing the loop a chance to clear (e.g. transient hardware glitch,
+      # stuck I2C bus). Subsequent boots reset the rapid_boot counter on first
+      # boot at expected cadence.
+      - if:
+          condition:
+            lambda: 'return id(boot_loop_force_sleep);'
+          then:
+            - lambda: 'ESP_LOGE("Apollo", "Boot loop active — sleeping 30 min for cooldown");'
+            - delay: 1s  # give the boot-loop log line time to flush
+            - script.execute: prepare_and_sleep
       # ---------------------------------------------------------------------
       # Self-heal scrub: on every successful connect, clear any retained
       # command messages at the broker by publishing empty + retain=true to
@@ -291,6 +331,13 @@ mqtt:
           timeout: 10s
       # Force IP address refresh before publishing
       - component.update: device_ip_address
+      # Sensor health tracking — increments per-sensor consecutive-failure
+      # counters on NaN, clears them on successful read. Also updates lifetime
+      # battery min/max for cell-aging diagnostics.
+      - script.execute: track_sensor_health
+      # Critical-battery check — if pct < threshold on a battery device,
+      # extend the next sleep duration (operator still sees this wake's data).
+      - script.execute: check_critical_battery
       # Drain-rate safety check — must run AFTER battery is valid (so we have
       # a current reading) and BEFORE publish (so the status flag goes out in
       # the same wake cycle if the alarm trips, including a possible flip from

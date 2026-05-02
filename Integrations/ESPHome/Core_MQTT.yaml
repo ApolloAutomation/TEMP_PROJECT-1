@@ -70,6 +70,64 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  # Critical-battery flag (set by check_critical_battery this wake). Drives the
+  # CRITICAL bit of the health rollup and the status/critical_battery topic.
+  - id: critical_battery_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Consecutive cold-boot count (NVS). A "cold boot" is wake_reason == cold_boot,
+  # which means the device did NOT wake from a normal deep-sleep timer or button
+  # press — i.e. it crashed/reset before reaching deep sleep. Cleared whenever
+  # we see a normal timer/button wake. ≥3 in a row = boot loop → 30-min cooldown.
+  - id: rapid_boot_count
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  # Set true by check_boot_loop when cooldown is needed. on_connect checks this
+  # at the very start and skips normal flow → straight to prepare_and_sleep.
+  - id: boot_loop_force_sleep
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Why the device woke up — captured in on_boot via esp_sleep_get_wakeup_cause()
+  # and published as meta/wake_reason. Values: timer, button, cold_boot, other.
+  - id: wake_reason_str
+    type: std::string
+    restore_value: no
+    initial_value: '"unknown"'
+  # Consecutive sensor read failures (NaN). Cleared on any successful read.
+  # Lets operators tell "occasional glitch" from "persistent hardware fault."
+  - id: sen55_fail_count
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  - id: sht_fail_count
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  - id: max17048_fail_count
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  # Lifetime min/max battery % seen (NVS). Useful for spotting aging cells —
+  # a healthy fleet has min ~50% (right before charge), max ~100%.
+  - id: lifetime_min_battery_pct
+    type: float
+    restore_value: true
+    initial_value: '101.0f'
+  - id: lifetime_max_battery_pct
+    type: float
+    restore_value: true
+    initial_value: '-1.0f'
+  - id: lifetime_min_battery_v
+    type: float
+    restore_value: true
+    initial_value: '99.0f'
+  - id: lifetime_max_battery_v
+    type: float
+    restore_value: true
+    initial_value: '-1.0f'
   # Lifetime count of drain-alarm trips (NVS). Lets operators tell at a glance
   # whether a device has had a history of trouble vs a fresh deployment.
   - id: drain_trigger_count
@@ -205,6 +263,14 @@ binary_sensor:
     icon: mdi:battery-alert-variant-outline
     entity_category: diagnostic
     lambda: 'return id(drain_protection_triggered);'
+
+  # Live flag — TRUE during the wake when battery was below the critical threshold.
+  - platform: template
+    name: "Critical Battery (this wake)"
+    id: critical_battery_binary
+    icon: mdi:battery-alert
+    entity_category: diagnostic
+    lambda: 'return id(critical_battery_active);'
 
 sensor:
   - platform: sen5x
@@ -350,6 +416,86 @@ sensor:
     update_interval: 30s
     lambda: 'return (float)id(drain_trigger_count);'
 
+  # Per-sensor consecutive-failure counters. Reset to 0 on a successful read.
+  # Non-zero values indicate a glitch or persistent fault; high values flag
+  # hardware that needs replacing.
+  - platform: template
+    name: "SEN55 Fail Count"
+    id: sen55_fail_count_sensor
+    icon: mdi:alert-circle-outline
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float)id(sen55_fail_count);'
+
+  - platform: template
+    name: "SHT3x Fail Count"
+    id: sht_fail_count_sensor
+    icon: mdi:alert-circle-outline
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float)id(sht_fail_count);'
+
+  - platform: template
+    name: "MAX17048 Fail Count"
+    id: max17048_fail_count_sensor
+    icon: mdi:alert-circle-outline
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float)id(max17048_fail_count);'
+
+  # Lifetime battery min/max — sentinel-aware (initial values 101 / -1 / 99 / -1
+  # mean "never observed yet" → return NaN so the web UI shows "Unknown").
+  - platform: template
+    name: "Lifetime Min Battery"
+    id: lifetime_min_battery_pct_sensor
+    icon: mdi:battery-low
+    entity_category: diagnostic
+    accuracy_decimals: 1
+    unit_of_measurement: "%"
+    update_interval: 60s
+    lambda: |-
+      float v = id(lifetime_min_battery_pct);
+      return (v > 100.0f) ? NAN : v;
+
+  - platform: template
+    name: "Lifetime Max Battery"
+    id: lifetime_max_battery_pct_sensor
+    icon: mdi:battery-high
+    entity_category: diagnostic
+    accuracy_decimals: 1
+    unit_of_measurement: "%"
+    update_interval: 60s
+    lambda: |-
+      float v = id(lifetime_max_battery_pct);
+      return (v < 0.0f) ? NAN : v;
+
+  - platform: template
+    name: "Lifetime Min Battery Voltage"
+    id: lifetime_min_battery_v_sensor
+    icon: mdi:flash-off
+    entity_category: diagnostic
+    accuracy_decimals: 3
+    unit_of_measurement: "V"
+    update_interval: 60s
+    lambda: |-
+      float v = id(lifetime_min_battery_v);
+      return (v > 10.0f) ? NAN : v;
+
+  - platform: template
+    name: "Lifetime Max Battery Voltage"
+    id: lifetime_max_battery_v_sensor
+    icon: mdi:flash
+    entity_category: diagnostic
+    accuracy_decimals: 3
+    unit_of_measurement: "V"
+    update_interval: 60s
+    lambda: |-
+      float v = id(lifetime_max_battery_v);
+      return (v < 0.0f) ? NAN : v;
+
 light:
   - platform: esp32_rmt_led_strip
     id: rgb_light
@@ -455,6 +601,43 @@ number:
     entity_category: CONFIG
     unit_of_measurement: "%"
 
+  # Critical-battery threshold (%). When battery drops below this on a battery
+  # device, the wake still publishes data (so operators see the low-battery
+  # alert come through), but the next sleep is extended to critical_battery_sleep_min
+  # to stretch remaining capacity. Set 0 to disable.
+  - platform: template
+    name: "Critical Battery Threshold"
+    id: critical_battery_threshold_pct
+    min_value: 0
+    max_value: 50
+    step: 1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    icon: "mdi:battery-alert-variant-outline"
+    entity_category: CONFIG
+    unit_of_measurement: "%"
+
+  # Sleep duration used while the critical-battery threshold is tripped.
+  # Default 60 min — half the wake frequency, doubling battery life from
+  # the moment the threshold triggers until the unit is swapped/recharged.
+  - platform: template
+    name: "Critical Battery Sleep Duration"
+    id: critical_battery_sleep_min
+    min_value: 5
+    max_value: 1440
+    step: 1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 60
+    icon: "mdi:battery-clock"
+    entity_category: CONFIG
+    unit_of_measurement: "min"
+
   # How often to publish MQTT data while Prevent Sleep is ON.
   # Default 10s. Increase for reduced chatter or decrease for faster live debugging.
   - platform: template
@@ -552,6 +735,23 @@ switch:
 
   # NOTE: the old `prevent_sleep` switch was merged into the `power_source`
   # select (battery=sleeps, wired=stays awake). Both were doing the same job.
+
+  # Verbose logging toggle — flips the runtime log level between WARN and DEBUG
+  # without re-flashing. Useful for live debugging in the field. Defaults to
+  # OFF on every boot (battery cost of DEBUG-level logging is non-trivial).
+  - platform: template
+    name: "Verbose Logging"
+    id: verbose_logging
+    icon: mdi:console-line
+    restore_mode: ALWAYS_OFF
+    optimistic: true
+    entity_category: "diagnostic"
+    on_turn_on:
+      - logger.set_level: DEBUG
+      - lambda: 'ESP_LOGW("Apollo", "Verbose logging ENABLED (DEBUG level)");'
+    on_turn_off:
+      - logger.set_level: WARN
+      - lambda: 'ESP_LOGW("Apollo", "Verbose logging DISABLED (WARN level)");'
 
 interval:
   # Battery-device wake-time enforcer. Single rule: if `power_source == battery`
@@ -769,6 +969,111 @@ script:
           snprintf(topic, sizeof(topic), "%s/meta/drain_last_trigger_boot", prefix);
           id(mqtt_client).publish(topic, drain_last_buf, strlen(drain_last_buf), 0, true);
 
+          // Critical-battery status — TRIGGERED if pct < threshold this wake.
+          const char* crit = id(critical_battery_active) ? "TRIGGERED" : "OK";
+          snprintf(topic, sizeof(topic), "%s/status/critical_battery", prefix);
+          id(mqtt_client).publish(topic, crit, strlen(crit), 0, true);
+
+          // Wake reason — what caused this wake (timer/button/cold_boot/other).
+          {
+            std::string wr = id(wake_reason_str);
+            snprintf(topic, sizeof(topic), "%s/meta/wake_reason", prefix);
+            id(mqtt_client).publish(topic, wr.c_str(), wr.length(), 0, true);
+          }
+
+          // Per-sensor failure counters (consecutive). Cleared on success.
+          char fail_buf[16];
+          snprintf(fail_buf, sizeof(fail_buf), "%u", (unsigned)id(sen55_fail_count));
+          snprintf(topic, sizeof(topic), "%s/meta/sen55_fail_count", prefix);
+          id(mqtt_client).publish(topic, fail_buf, strlen(fail_buf), 0, true);
+
+          snprintf(fail_buf, sizeof(fail_buf), "%u", (unsigned)id(sht_fail_count));
+          snprintf(topic, sizeof(topic), "%s/meta/sht_fail_count", prefix);
+          id(mqtt_client).publish(topic, fail_buf, strlen(fail_buf), 0, true);
+
+          snprintf(fail_buf, sizeof(fail_buf), "%u", (unsigned)id(max17048_fail_count));
+          snprintf(topic, sizeof(topic), "%s/meta/max17048_fail_count", prefix);
+          id(mqtt_client).publish(topic, fail_buf, strlen(fail_buf), 0, true);
+
+          // Lifetime battery min/max (publish only when initialized — sentinels
+          // mean "never observed yet", in which case we skip the publish).
+          if (id(lifetime_min_battery_pct) <= 100.0f) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.1f", id(lifetime_min_battery_pct));
+            snprintf(topic, sizeof(topic), "%s/meta/lifetime_min_battery_pct", prefix);
+            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+          }
+          if (id(lifetime_max_battery_pct) >= 0.0f) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.1f", id(lifetime_max_battery_pct));
+            snprintf(topic, sizeof(topic), "%s/meta/lifetime_max_battery_pct", prefix);
+            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+          }
+          if (id(lifetime_min_battery_v) <= 10.0f) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.3f", id(lifetime_min_battery_v));
+            snprintf(topic, sizeof(topic), "%s/meta/lifetime_min_battery_v", prefix);
+            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+          }
+          if (id(lifetime_max_battery_v) >= 0.0f) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.3f", id(lifetime_max_battery_v));
+            snprintf(topic, sizeof(topic), "%s/meta/lifetime_max_battery_v", prefix);
+            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+          }
+
+          // Health rollup — single OK/DEGRADED/CRITICAL field for dashboards.
+          // Same logic as the Health Status text_sensor; computed inline so we
+          // don't depend on the sensor having updated yet this wake.
+          const char* health = "OK";
+          if (id(drain_protection_triggered) || id(critical_battery_active) ||
+              id(sen55_fail_count) >= 5 || id(sht_fail_count) >= 5 ||
+              id(max17048_fail_count) >= 5 || id(boot_loop_force_sleep)) {
+            health = "CRITICAL";
+          } else if (id(drain_trigger_count) > 0 || id(sen55_fail_count) > 0 ||
+                     id(sht_fail_count) > 0 || id(max17048_fail_count) > 0 ||
+                     id(rapid_boot_count) > 0) {
+            health = "DEGRADED";
+          }
+          snprintf(topic, sizeof(topic), "%s/status/health", prefix);
+          id(mqtt_client).publish(topic, health, strlen(health), 0, true);
+
+          // ---- Configured values (meta/config_*) ----
+          // Mirrored to MQTT so operators can audit fleet config without
+          // hitting each device's web page.
+          char cfg_buf[24];
+          snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(deep_sleep_sleep_duration).state);
+          snprintf(topic, sizeof(topic), "%s/meta/config_sleep_duration_min", prefix);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+
+          snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(max_wake_time_s).state);
+          snprintf(topic, sizeof(topic), "%s/meta/config_max_wake_time_s", prefix);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+
+          snprintf(cfg_buf, sizeof(cfg_buf), "%.1f", id(drain_threshold_pct_per_hour).state);
+          snprintf(topic, sizeof(topic), "%s/meta/config_drain_threshold_pct_per_h", prefix);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+
+          snprintf(cfg_buf, sizeof(cfg_buf), "%.1f", id(drain_min_drop_pct).state);
+          snprintf(topic, sizeof(topic), "%s/meta/config_drain_min_drop_pct", prefix);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+
+          snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(critical_battery_threshold_pct).state);
+          snprintf(topic, sizeof(topic), "%s/meta/config_critical_battery_threshold_pct", prefix);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+
+          snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(critical_battery_sleep_min).state);
+          snprintf(topic, sizeof(topic), "%s/meta/config_critical_battery_sleep_min", prefix);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+
+          snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(warmup_delay_s).state);
+          snprintf(topic, sizeof(topic), "%s/meta/config_warmup_delay_s", prefix);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+
+          snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(prevent_sleep_publish_interval_s).state);
+          snprintf(topic, sizeof(topic), "%s/meta/config_publish_interval_s", prefix);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+
           // --- Diagnostic metadata (firmware, counters, health) ---
           const char* fw_ver = "${version}";
           snprintf(topic, sizeof(topic), "%s/meta/firmware_version", prefix);
@@ -853,6 +1158,8 @@ script:
                    temp_f, rh_pct,
                    (temp_f < 0 || rh_pct < 0) ? "[SHT3x failing]" : "");
           ESP_LOGW("Apollo", "  Topics: %s/sensor/...", prefix);
+          ESP_LOGW("Apollo", "  Wake Reason: %s", id(wake_reason_str).c_str());
+          ESP_LOGW("Apollo", "  Health:      %s", health);
           // Drain protection summary — always logged so it's grep-able in
           // captured logs even when the device is healthy.
           if (id(drain_protection_triggered)) {
@@ -865,6 +1172,16 @@ script:
                      (unsigned)id(drain_last_trigger_boot));
           } else {
             ESP_LOGW("Apollo", "  Drain Alarm: OK (no prior trips)");
+          }
+          if (id(critical_battery_active)) {
+            ESP_LOGE("Apollo", "  Critical Battery: TRIGGERED — extending sleep to %.0f min",
+                     id(critical_battery_sleep_min).state);
+          }
+          if (id(sen55_fail_count) > 0 || id(sht_fail_count) > 0 || id(max17048_fail_count) > 0) {
+            ESP_LOGW("Apollo", "  Sensor Fails: SEN55=%u SHT3x=%u MAX17048=%u (consecutive)",
+                     (unsigned)id(sen55_fail_count),
+                     (unsigned)id(sht_fail_count),
+                     (unsigned)id(max17048_fail_count));
           }
           ESP_LOGW("Apollo", "========================================");
           ESP_LOGI("Apollo", "All MQTT data published");
@@ -1029,6 +1346,134 @@ script:
             }
             // Reset baseline so we don't immediately re-alarm next call.
             set_baseline("reset (alarm fired)");
+          }
+
+  # ---------------------------------------------------------------------
+  # Capture wake reason via ESP-IDF API. Called from on_boot at high priority
+  # before anything else, so the value is available throughout the wake cycle.
+  # ---------------------------------------------------------------------
+  - id: capture_wake_reason
+    then:
+      - lambda: |-
+          esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+          switch (cause) {
+            case ESP_SLEEP_WAKEUP_TIMER:
+              id(wake_reason_str) = "timer"; break;
+            case ESP_SLEEP_WAKEUP_GPIO:
+            case ESP_SLEEP_WAKEUP_EXT0:
+            case ESP_SLEEP_WAKEUP_EXT1:
+              id(wake_reason_str) = "button"; break;
+            case ESP_SLEEP_WAKEUP_UNDEFINED:
+              id(wake_reason_str) = "cold_boot"; break;
+            default: {
+              char buf[16];
+              snprintf(buf, sizeof(buf), "other_%d", (int)cause);
+              id(wake_reason_str) = buf;
+              break;
+            }
+          }
+          ESP_LOGW("Apollo", "Wake reason: %s", id(wake_reason_str).c_str());
+
+  # ---------------------------------------------------------------------
+  # Boot-loop detector. Runs at high-priority on_boot, after capture_wake_reason.
+  # A "cold boot" wake reason means the device did NOT come out of normal deep
+  # sleep — it hard-reset or crashed before reaching deep_sleep.enter. Three
+  # cold boots in a row indicates a boot loop; force a 30-min cooldown so the
+  # underlying issue (transient I2C bus, panic during init, etc) has a chance
+  # to clear before another retry.
+  #
+  # Counter is cleared on any normal timer/button wake — a single successful
+  # cycle resets the safety. Timer/button wakes ARE "OK" — they prove the
+  # device made it to deep sleep last cycle.
+  # ---------------------------------------------------------------------
+  - id: check_boot_loop
+    then:
+      - lambda: |-
+          if (id(wake_reason_str) == "cold_boot") {
+            id(rapid_boot_count) += 1;
+            ESP_LOGW("Apollo", "Cold-boot detected (consecutive: %u)", (unsigned)id(rapid_boot_count));
+          } else {
+            if (id(rapid_boot_count) > 0) {
+              ESP_LOGI("Apollo", "Normal wake (%s) — clearing cold-boot count (was %u)",
+                       id(wake_reason_str).c_str(), (unsigned)id(rapid_boot_count));
+            }
+            id(rapid_boot_count) = 0;
+          }
+
+          if (id(rapid_boot_count) >= 3) {
+            ESP_LOGE("Apollo", "BOOT LOOP detected (%u consecutive cold boots) — forcing 30-min cooldown",
+                     (unsigned)id(rapid_boot_count));
+            id(deep_sleep_1).set_sleep_duration(30ULL * 60ULL * 1000ULL);
+            id(boot_loop_force_sleep) = true;
+          }
+
+  # ---------------------------------------------------------------------
+  # Critical-battery handler. Called from on_connect after the battery read
+  # is valid. If we're below the configured threshold AND on battery power,
+  # extend the next sleep to critical_battery_sleep_min — this halves the
+  # wake frequency and roughly doubles remaining runtime. Still publishes
+  # all data this wake so operators see the alert come through.
+  # ---------------------------------------------------------------------
+  - id: check_critical_battery
+    then:
+      - lambda: |-
+          id(critical_battery_active) = false;
+          if (id(power_source).state != "battery") return;
+          if (id(critical_battery_threshold_pct).state <= 0.0f) return;
+          float pct = id(batt_pct).state;
+          if (std::isnan(pct)) return;
+
+          if (pct < id(critical_battery_threshold_pct).state) {
+            id(critical_battery_active) = true;
+            uint64_t crit_sleep_ms = (uint64_t)(id(critical_battery_sleep_min).state) * 60ULL * 1000ULL;
+            id(deep_sleep_1).set_sleep_duration(crit_sleep_ms);
+            ESP_LOGE("Apollo", "CRITICAL BATTERY: %.1f%% < %.1f%% — extending sleep to %.0f min",
+                     pct, id(critical_battery_threshold_pct).state, id(critical_battery_sleep_min).state);
+          }
+
+  # ---------------------------------------------------------------------
+  # Sensor health tracker. Called from on_connect right after the wait_until
+  # block. Increments per-sensor failure counters when the corresponding
+  # reading is NaN; clears them on successful read. Also updates lifetime
+  # battery min/max for cell-aging diagnostics.
+  # ---------------------------------------------------------------------
+  - id: track_sensor_health
+    then:
+      - lambda: |-
+          // SEN55 (PM mass) — any NaN counts as a failure for this sensor.
+          if (std::isnan(id(pm_1_0).state) || std::isnan(id(pm_2_5).state) ||
+              std::isnan(id(pm_4_0).state) || std::isnan(id(pm_10_0).state)) {
+            id(sen55_fail_count) += 1;
+            ESP_LOGW("Apollo", "SEN55 read failure (consecutive: %u)", (unsigned)id(sen55_fail_count));
+          } else {
+            id(sen55_fail_count) = 0;
+          }
+
+          // SHT3x temp/RH
+          if (std::isnan(id(sht_temperature).state) || std::isnan(id(sht_humidity).state)) {
+            id(sht_fail_count) += 1;
+            ESP_LOGW("Apollo", "SHT3x read failure (consecutive: %u)", (unsigned)id(sht_fail_count));
+          } else {
+            id(sht_fail_count) = 0;
+          }
+
+          // MAX17048 battery
+          if (std::isnan(id(batt_pct).state)) {
+            id(max17048_fail_count) += 1;
+            ESP_LOGW("Apollo", "MAX17048 read failure (consecutive: %u)", (unsigned)id(max17048_fail_count));
+          } else {
+            id(max17048_fail_count) = 0;
+
+            // Update lifetime battery min/max while we have a valid reading.
+            float pct = id(batt_pct).state;
+            if (pct < id(lifetime_min_battery_pct)) id(lifetime_min_battery_pct) = pct;
+            if (pct > id(lifetime_max_battery_pct)) id(lifetime_max_battery_pct) = pct;
+
+            float v = id(batt_v).state;
+            if (!std::isnan(v)) {
+              if (v < id(lifetime_min_battery_v)) id(lifetime_min_battery_v) = v;
+              if (v > id(lifetime_max_battery_v)) id(lifetime_max_battery_v) = v;
+            }
           }
 
   # Consolidated sleep entry — all sleep paths call this script.
@@ -1576,6 +2021,45 @@ text:
     mode: text
 
 text_sensor:
+
+  # Why the device woke up this cycle. Set by capture_wake_reason in on_boot.
+  # Values: timer, button, cold_boot, other_<N>.
+  - platform: template
+    name: "Wake Reason"
+    id: wake_reason_sensor
+    icon: mdi:power-on
+    entity_category: diagnostic
+    update_interval: 30s
+    lambda: 'return id(wake_reason_str);'
+
+  # Single-glance health rollup. Aggregates the major diagnostic signals into
+  # one of three states. Subscribe to status/health to inventory fleet status.
+  #   CRITICAL → drain alarm tripped this wake OR battery below critical threshold
+  #              OR a sensor has failed ≥5 consecutive times
+  #   DEGRADED → device has a history of drain trips, OR sensor has failed
+  #              between 1-4 times in a row, OR boot loop counter elevated
+  #   OK       → none of the above
+  - platform: template
+    name: "Health Status"
+    id: health_status_sensor
+    icon: mdi:heart-pulse
+    entity_category: diagnostic
+    update_interval: 30s
+    lambda: |-
+      // CRITICAL — fire on any of these
+      if (id(drain_protection_triggered)) return std::string("CRITICAL");
+      if (id(critical_battery_active)) return std::string("CRITICAL");
+      if (id(sen55_fail_count) >= 5) return std::string("CRITICAL");
+      if (id(sht_fail_count) >= 5) return std::string("CRITICAL");
+      if (id(max17048_fail_count) >= 5) return std::string("CRITICAL");
+      if (id(boot_loop_force_sleep)) return std::string("CRITICAL");
+      // DEGRADED — historical or partial issues
+      if (id(drain_trigger_count) > 0) return std::string("DEGRADED");
+      if (id(sen55_fail_count) > 0) return std::string("DEGRADED");
+      if (id(sht_fail_count) > 0) return std::string("DEGRADED");
+      if (id(max17048_fail_count) > 0) return std::string("DEGRADED");
+      if (id(rapid_boot_count) > 0) return std::string("DEGRADED");
+      return std::string("OK");
 
   # Human-readable summary of the most recent drain-alarm trip.
   # "Never" when drain_last_trigger_boot == 0 (fresh device or NVS reset).
