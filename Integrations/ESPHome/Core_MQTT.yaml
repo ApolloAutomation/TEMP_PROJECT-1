@@ -565,11 +565,13 @@ number:
   #
   # Reference rates on this hardware:
   #   - Battery, sleeping with brief wakes: ~0.1 %/h  (well under any threshold)
-  #   - Battery, stuck awake at 200mA:      ~2.5-4 %/h
-  #   - Wired, lost PoE/USB at 250mA:       ~3-4 %/h
+  #   - Battery, stuck awake at 150-250mA:   ~2-4 %/h
+  #   - Wired, lost PoE/USB while idle:      ~1-1.5 %/h
+  #   - Wired, lost PoE/USB while active:    ~2.5-4 %/h
   #
-  # Default 3 %/h catches the bottom of those failure ranges with margin.
-  # Set 0 to disable the alarm entirely.
+  # Default 1.5 %/h is intentionally aggressive — wired-but-actually-on-battery
+  # devices need to be caught BEFORE significant battery loss. Combined with
+  # the min-drop floor below, it stays noise-immune. Set 0 to disable.
   - platform: template
     name: "Drain Alarm Threshold"
     id: drain_threshold_pct_per_hour
@@ -580,7 +582,7 @@ number:
     update_interval: never
     optimistic: true
     restore_value: true
-    initial_value: 3.0
+    initial_value: 1.5
     icon: "mdi:battery-alert"
     entity_category: CONFIG
     unit_of_measurement: "%/h"
@@ -606,10 +608,34 @@ number:
     entity_category: CONFIG
     unit_of_measurement: "%"
 
-  # Critical-battery threshold (%). When battery drops below this on a battery
-  # device, the wake still publishes data (so operators see the low-battery
-  # alert come through), but the next sleep is extended to critical_battery_sleep_min
-  # to stretch remaining capacity. Set 0 to disable.
+  # Wired-device cumulative-drop trigger (%). On wired devices, ANY sustained
+  # drop from the recorded "high" baseline indicates lost wired power — there's
+  # no scenario where a properly-powered wired device should be losing battery.
+  # When cumulative drop exceeds this regardless of rate, flip to battery mode.
+  # Catches very-slow drains (e.g., 1 %/h while idle) that the rate-based
+  # alarm above wouldn't notice until critical battery levels.
+  # Default 5% gives ~3x noise margin while still catching the issue early.
+  # Wired devices only — battery devices ignore this (they're allowed to drain).
+  - platform: template
+    name: "Wired Drop Threshold"
+    id: wired_drop_threshold_pct
+    min_value: 0
+    max_value: 50
+    step: 0.5
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 5.0
+    icon: "mdi:battery-arrow-down"
+    entity_category: CONFIG
+    unit_of_measurement: "%"
+
+  # Critical-battery threshold (%). When battery drops below this on ANY device
+  # (regardless of power source), the wake still publishes data but the device
+  # is forced into battery mode and the next sleep is extended to
+  # critical_battery_sleep_min. Last-resort safety — earlier checks (drain rate,
+  # wired drop) should have already caught the issue. Set 0 to disable.
   - platform: template
     name: "Critical Battery Threshold"
     id: critical_battery_threshold_pct
@@ -1078,6 +1104,10 @@ script:
           snprintf(topic, sizeof(topic), "%s/meta/config_drain_min_drop_pct", prefix);
           id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
 
+          snprintf(cfg_buf, sizeof(cfg_buf), "%.1f", id(wired_drop_threshold_pct).state);
+          snprintf(topic, sizeof(topic), "%s/meta/config_wired_drop_threshold_pct", prefix);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+
           snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(critical_battery_threshold_pct).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_critical_battery_threshold_pct", prefix);
           id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
@@ -1363,14 +1393,28 @@ script:
           ESP_LOGI("Apollo", "Drain check [%s]: %.1f%% over %.0f min = %.2f%%/h (floors: %.1f%%, %.1f%%/h)",
                    is_wired ? "wired" : "battery", drop, total_minutes, rate, min_drop, rate_thr);
 
-          // Alarm fires only when BOTH conditions trip.
-          if (drop >= min_drop && rate >= rate_thr) {
+          // ---- Trigger conditions ----
+          // Trigger 1: rate-based — both rate AND drop exceed thresholds (filters
+          // both noise spikes and slow degradation; same for battery and wired).
+          bool trip_rate = (drop >= min_drop && rate >= rate_thr);
+
+          // Trigger 2: wired-cumulative — wired devices should never drain;
+          // any sustained drop above wired_drop_threshold_pct is "lost wired
+          // power" until proven otherwise, regardless of rate. Catches very
+          // slow drains (~1 %/h idle) that wouldn't trip the rate threshold.
+          bool trip_wired_drop = (is_wired &&
+                                  id(wired_drop_threshold_pct).state > 0.0f &&
+                                  drop >= id(wired_drop_threshold_pct).state);
+
+          if (trip_rate || trip_wired_drop) {
             id(drain_protection_triggered) = true;
             id(drain_trigger_count) += 1;
             id(drain_last_trigger_boot) = id(boot_count);
-            ESP_LOGE("Apollo", "DRAIN ALARM #%u: %.1f%% drop / %.2f%%/h rate exceeds floors (%.1f%%, %.1f%%/h) — flipping to battery mode",
-                     (unsigned)id(drain_trigger_count),
-                     drop, rate, min_drop, rate_thr);
+            const char* reason = trip_wired_drop ? "wired-drop" : "rate";
+            ESP_LOGE("Apollo", "DRAIN ALARM #%u [%s]: %.1f%% drop / %.2f%%/h rate (floors %.1f%% drop, %.1f%%/h rate, %.1f%% wired-drop) — flipping to battery mode",
+                     (unsigned)id(drain_trigger_count), reason,
+                     drop, rate, min_drop, rate_thr,
+                     id(wired_drop_threshold_pct).state);
             if (id(power_source).current_option() != "battery") {
               auto call = id(power_source).make_call();
               call.set_option("battery");
@@ -1440,23 +1484,34 @@ script:
           }
 
   # ---------------------------------------------------------------------
-  # Critical-battery handler. Called from on_connect after the battery read
-  # is valid. If we're below the configured threshold AND on battery power,
-  # extend the next sleep to critical_battery_sleep_min — this halves the
-  # wake frequency and roughly doubles remaining runtime. Still publishes
-  # all data this wake so operators see the alert come through.
+  # Critical-battery handler. Last-resort safety net — runs on EVERY device
+  # regardless of power_source. If a wired device is somehow at critical
+  # battery (lost wired power + drain detector somehow missed it), this
+  # forces it to battery mode AND extends the next sleep so it actually sleeps.
+  #
+  # In normal operation the drain detector + wired-drop check should have
+  # already caught the issue much earlier than 5%. This is the floor.
   # ---------------------------------------------------------------------
   - id: check_critical_battery
     then:
       - lambda: |-
           id(critical_battery_active) = false;
-          if (id(power_source).current_option() != "battery") return;
           if (id(critical_battery_threshold_pct).state <= 0.0f) return;
           float pct = id(batt_pct).state;
           if (std::isnan(pct)) return;
 
           if (pct < id(critical_battery_threshold_pct).state) {
             id(critical_battery_active) = true;
+            // Force battery mode if we're not already there (catches the
+            // wired-but-actually-on-battery scenario when drain detection
+            // somehow missed it).
+            if (id(power_source).current_option() != "battery") {
+              ESP_LOGE("Apollo", "CRITICAL BATTERY on wired device — flipping to battery mode");
+              auto call = id(power_source).make_call();
+              call.set_option("battery");
+              call.perform();
+            }
+            // Extend next sleep so each wake costs less while charge is critical.
             uint64_t crit_sleep_ms = (uint64_t)(id(critical_battery_sleep_min).state) * 60ULL * 1000ULL;
             id(deep_sleep_1).set_sleep_duration(crit_sleep_ms);
             ESP_LOGE("Apollo", "CRITICAL BATTERY: %.1f%% < %.1f%% — extending sleep to %.0f min",
