@@ -1081,16 +1081,18 @@ script:
           }
 
           // Health rollup — single OK/DEGRADED/CRITICAL field for dashboards.
-          // Same logic as the Health Status text_sensor; computed inline so we
-          // don't depend on the sensor having updated yet this wake.
+          // Reflects CURRENT state only. The lifetime drain_trigger_count is
+          // exposed separately (meta/drain_trigger_count) — it doesn't roll up
+          // here, so a device that recovered from a drain event returns to OK.
           const char* health = "OK";
           if (id(drain_protection_triggered) || id(critical_battery_active) ||
               id(sen55_fail_count) >= 5 || id(sht_fail_count) >= 5 ||
               id(max17048_fail_count) >= 5 || id(boot_loop_force_sleep)) {
             health = "CRITICAL";
-          } else if (id(drain_trigger_count) > 0 || id(sen55_fail_count) > 0 ||
-                     id(sht_fail_count) > 0 || id(max17048_fail_count) > 0 ||
-                     id(rapid_boot_count) > 0) {
+          } else if (id(sen55_fail_count) > 0 || id(sht_fail_count) > 0 ||
+                     id(max17048_fail_count) > 0 || id(rapid_boot_count) > 0) {
+            // Currently failing sensor(s) or recent rapid reboots only.
+            // These counters auto-clear on healthy reads / normal wakes.
             health = "DEGRADED";
           }
           snprintf(topic, sizeof(topic), "%s/status/health", prefix);
@@ -2175,15 +2177,17 @@ text_sensor:
     entity_category: diagnostic
     update_interval: 30s
     lambda: |-
-      // CRITICAL — fire on any of these
+      // CRITICAL — currently in a bad state
       if (id(drain_protection_triggered)) return std::string("CRITICAL");
       if (id(critical_battery_active)) return std::string("CRITICAL");
       if (id(sen55_fail_count) >= 5) return std::string("CRITICAL");
       if (id(sht_fail_count) >= 5) return std::string("CRITICAL");
       if (id(max17048_fail_count) >= 5) return std::string("CRITICAL");
       if (id(boot_loop_force_sleep)) return std::string("CRITICAL");
-      // DEGRADED — historical or partial issues
-      if (id(drain_trigger_count) > 0) return std::string("DEGRADED");
+      // DEGRADED — currently failing or recently unstable. These counters
+      // auto-clear on healthy reads / normal timer wakes, so a recovered
+      // device returns to OK. The lifetime drain_trigger_count is NOT in
+      // this rollup — it's its own dedicated sensor for fleet auditing.
       if (id(sen55_fail_count) > 0) return std::string("DEGRADED");
       if (id(sht_fail_count) > 0) return std::string("DEGRADED");
       if (id(max17048_fail_count) > 0) return std::string("DEGRADED");
