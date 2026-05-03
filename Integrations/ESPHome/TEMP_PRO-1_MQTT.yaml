@@ -58,6 +58,10 @@ mqtt:
   topic_prefix: null
   discovery: false
 
+  # Default 15-min auto-reboot is dangerous for offline-capable devices —
+  # broker outages would otherwise cause endless reboot loops. Disable.
+  reboot_timeout: 0s
+
   on_connect:
     then:
       - logger.log: "Connected to MQTT broker"

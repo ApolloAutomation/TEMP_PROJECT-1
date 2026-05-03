@@ -244,6 +244,9 @@ ethernet:
   cs_pin: GPIO9
   interrupt_pin: GPIO13
   reset_pin: GPIO14
+  # Note: ESPHome's ethernet component doesn't have a reboot_timeout option
+  # (unlike wifi/mqtt). The MQTT reboot_timeout below is what was triggering
+  # the 15-min auto-reboot we saw, not the ethernet stack itself.
 
 # MQTT Configuration
 mqtt:
@@ -256,6 +259,11 @@ mqtt:
   # Disable ALL automatic MQTT publishing - we manually publish only what we want
   topic_prefix: null
   discovery: false
+
+  # Default is 15min — auto-reboot if broker can't be reached. For our use case
+  # (offline-capable devices that publish opportunistically) this is exactly
+  # wrong: it triggers a reboot loop on broker outages. Disable entirely.
+  reboot_timeout: 0s
 
   # NOTE: birth_message and will_message are set programmatically in on_boot
   # priority 600 (see below). The YAML versions can't use the runtime device

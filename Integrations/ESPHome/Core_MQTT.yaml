@@ -1590,6 +1590,21 @@ script:
             }
           }
 
+          // If we got here with all sensors reporting cleanly, the device is
+          // healthy regardless of how this wake started. Clear the boot-loop
+          // counter — a healthy successful read is a stronger signal than the
+          // "did we wake from timer or cold boot" heuristic, and it lets user
+          // initiated resets during testing not accumulate on wired devices
+          // that never get a "normal" timer wake to clear the counter.
+          if (id(rapid_boot_count) > 0 &&
+              id(sen55_fail_count) == 0 &&
+              id(sht_fail_count) == 0 &&
+              id(max17048_fail_count) == 0) {
+            ESP_LOGI("Apollo", "All sensors healthy this wake — clearing rapid_boot_count (was %u)",
+                     (unsigned)id(rapid_boot_count));
+            id(rapid_boot_count) = 0;
+          }
+
   # Consolidated sleep entry — all sleep paths call this script.
   # NOTE: accessory_power off + GPIO7 hold live in on_shutdown (device file),
   # NOT here. Cutting power to the W5500 before ethernet has cleanly torn down
