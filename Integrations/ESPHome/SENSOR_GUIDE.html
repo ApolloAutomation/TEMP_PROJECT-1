@@ -1,0 +1,1083 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Apollo TEMP_PRO-1 — Operations Guide</title>
+  
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --bg: #ffffff;
+    --muted: #666;
+    --accent: #2563eb;
+    --code-bg: #f5f5f5;
+    --border: #e5e7eb;
+    --table-header: #f9fafb;
+    --table-row-alt: #fafafa;
+    --warn: #b45309;
+    --crit: #b91c1c;
+    --ok: #15803d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e5e7eb;
+      --bg: #0f172a;
+      --muted: #9ca3af;
+      --accent: #60a5fa;
+      --code-bg: #1e293b;
+      --border: #334155;
+      --table-header: #1e293b;
+      --table-row-alt: #1a2438;
+    }
+  }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    max-width: 900px;
+    margin: 2rem auto;
+    padding: 0 1.5rem 4rem;
+    line-height: 1.6;
+    font-size: 15px;
+  }
+  h1 { font-size: 2rem; margin-top: 2rem; padding-bottom: 0.4rem; border-bottom: 2px solid var(--border); }
+  h2 { font-size: 1.5rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.2rem; margin-top: 2rem; color: var(--accent); }
+  h4 { font-size: 1.05rem; margin-top: 1.5rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+  code {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 3px;
+    font-size: 0.92em;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 1rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+  }
+  pre code { background: transparent; padding: 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1rem 0;
+    font-size: 0.94em;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--table-header);
+    font-weight: 600;
+  }
+  tr:nth-child(even) td { background: var(--table-row-alt); }
+  blockquote {
+    margin: 1rem 0;
+    padding: 0.5rem 1rem;
+    border-left: 4px solid var(--accent);
+    background: var(--code-bg);
+    color: var(--muted);
+  }
+  ul, ol { padding-left: 1.5rem; }
+  li { margin: 0.25rem 0; }
+  /* Print-friendly */
+  @media print {
+    body { max-width: 100%; margin: 0; font-size: 11pt; padding: 0.5in; color: #000; background: #fff; }
+    h1, h2, h3 { color: #000; page-break-after: avoid; }
+    h2 { page-break-before: auto; margin-top: 1.5rem; }
+    table { font-size: 10pt; page-break-inside: avoid; }
+    pre, code { background: #f0f0f0 !important; color: #000 !important; }
+    a { color: #000; text-decoration: none; }
+    a::after { content: ""; }
+    @page { margin: 0.5in 0.6in; }
+  }
+  /* Header on first page */
+  .doc-header {
+    text-align: center;
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid var(--accent);
+  }
+  .doc-header .subtitle {
+    color: var(--muted);
+    font-size: 0.95rem;
+    margin-top: 0.25rem;
+  }
+</style>
+
+</head>
+<body>
+  
+<div class="doc-header">
+  <div class="subtitle">Apollo Automation · TEMP_PRO-1 MQTT Sensor</div>
+  <div class="subtitle" style="margin-top:0.5rem">Operations Guide — Field Reference</div>
+</div>
+
+  <h1 id="apollo-temp_pro-1-sensor-operations-guide">Apollo TEMP_PRO-1 Sensor — Operations Guide</h1>
+<p>A field reference for deploying, configuring, and troubleshooting the
+TEMP_PRO-1 MQTT (Ethernet and WiFi variants).</p>
+<hr />
+<h2 id="table-of-contents">Table of Contents</h2>
+<ol>
+<li><a href="#what-it-is">What It Is</a></li>
+<li><a href="#hardware-specs">Hardware Specs</a></li>
+<li><a href="#power-modes-battery-vs-wired">Power Modes (Battery vs Wired)</a></li>
+<li><a href="#deployment-checklist">Deployment Checklist</a></li>
+<li><a href="#boot-button-cheat-sheet">Boot Button Cheat Sheet</a></li>
+<li><a href="#web-ui-reference">Web UI Reference</a></li>
+<li><a href="#mqtt-topic-reference">MQTT Topic Reference</a></li>
+<li><a href="#safety-features">Safety Features</a></li>
+<li><a href="#common-operator-workflows">Common Operator Workflows</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+</ol>
+<hr />
+<h2 id="what-it-is">What It Is</h2>
+<p>A self-contained air-quality sensor that wakes every 30 minutes (configurable),
+samples PM/temperature/humidity, publishes to MQTT, and goes back to sleep.
+On battery alone it lasts roughly <strong>5 months</strong> between charges. Plugged into
+PoE/USB it runs continuously.</p>
+<p>Built around an ESP32-S3 with deep-sleep, an SEN55 PM/VOC/NOx sensor, an
+SHT3x temperature/humidity sensor, an SHT3x probe input, and a MAX17048
+battery fuel gauge.</p>
+<hr />
+<h2 id="hardware-specs">Hardware Specs</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Spec</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MCU</td>
+<td>ESP32-S3, 160 MHz (down-clocked from 240 for power)</td>
+</tr>
+<tr>
+<td>PM/VOC/NOx</td>
+<td>Sensirion SEN55 (mass concentration only — VOC/NOx disabled for short wakes)</td>
+</tr>
+<tr>
+<td>Temp/Humidity</td>
+<td>SHT3x (probe-mountable for accuracy)</td>
+</tr>
+<tr>
+<td>Battery gauge</td>
+<td>MAX17048 (always-on)</td>
+</tr>
+<tr>
+<td>Battery</td>
+<td>8000 mAh LiPo</td>
+</tr>
+<tr>
+<td>Network</td>
+<td>W5500 Ethernet (PoE-capable) <strong>or</strong> WiFi (separate firmware)</td>
+</tr>
+<tr>
+<td>Connectivity</td>
+<td>MQTT only — no Home Assistant API, no auto-discovery</td>
+</tr>
+<tr>
+<td>Power options</td>
+<td>USB-C, PoE (Ethernet variant), battery</td>
+</tr>
+<tr>
+<td>Sleep current</td>
+<td>~6.9 mA (with W5500) / ~4.2 mA (without) / ~14 µA chip-floor</td>
+</tr>
+<tr>
+<td>Active current</td>
+<td>~150–250 mA depending on workload</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="power-modes-battery-vs-wired">Power Modes (Battery vs Wired)</h2>
+<p>The single most important setting. Determined by <code>Power Source</code> (web UI) or
+<code>apollo/temp-pro-1/command/power_source</code> (MQTT).</p>
+<h3 id="battery-mode-default"><code>battery</code> mode (default)</h3>
+<ul>
+<li>Wakes on a timer (<code>Sleep Duration</code>, default 30 min)</li>
+<li>Connects to MQTT, publishes one batch of readings, sleeps</li>
+<li>Forced sleep at <code>Max Wake Time</code> (default 45 s) regardless of MQTT state</li>
+<li>Critical-battery handling: &lt; 5% battery extends sleep to 60 min</li>
+<li>Drain detection running in background</li>
+</ul>
+<h3 id="wired-mode"><code>wired</code> mode</h3>
+<ul>
+<li>Stays awake continuously</li>
+<li>Re-publishes every <code>Publish Interval</code> seconds (default 10 s)</li>
+<li>Drain detection running in background — flips to battery if drain detected</li>
+<li>Boot-loop detection running — flips to battery if 3+ cold boots in a row</li>
+</ul>
+<h3 id="auto-flip-safety">Auto-flip safety</h3>
+<p>A <code>wired</code> device flips to <code>battery</code> automatically if:
+- Drain rate ≥ 1.5 %/h <strong>AND</strong> drop ≥ 3% from baseline (rate trigger)
+- Drop ≥ 5% from baseline regardless of rate (cumulative trigger)
+- Battery hits critical threshold (default 5%)
+- 3+ consecutive cold boots detected (boot loop)</p>
+<p>Operator returns it to wired mode (if intended) by web UI, MQTT command,
+or the boot button.</p>
+<hr />
+<h2 id="deployment-checklist">Deployment Checklist</h2>
+<h3 id="per-unit-at-install-time">Per unit, at install time</h3>
+<ol>
+<li><strong>Flash firmware</strong> (or use pre-flashed unit)</li>
+<li><strong>Power on</strong> (battery or USB)</li>
+<li><strong>Set Power Source</strong>
+   - <strong>Battery deploys</strong>: Leave default (<code>battery</code>). Skip this step.
+   - <strong>Wired deploys</strong>: 3× boot button (or web UI / MQTT) → <code>wired</code></li>
+<li><strong>Set Column ID</strong> (web UI: <code>Column ID</code> dropdown or <code>Custom Column ID</code>
+   text field) — used for per-device topic prefix</li>
+<li><strong>Confirm via logs or first MQTT publish</strong>:
+   - <code>Power Src:</code> matches reality
+   - <code>Drain Alarm: OK</code>
+   - <code>Health: OK</code>
+   - Sensors returning real values</li>
+</ol>
+<h3 id="per-fleet-before-deploying">Per fleet, before deploying</h3>
+<ol>
+<li>Set <strong>MQTT broker / port / username / password</strong> — either via the
+   <code>!secret</code> defaults at compile time, or per-device via the web UI text
+   fields (override compile-time defaults)</li>
+<li>Set <strong>Web Auth Username / Password</strong> if you don't want defaults</li>
+<li>Set static IP if needed (web UI: <code>Use Static IP</code> switch + IP fields)</li>
+<li>Set deployment metadata (<code>Deployment Notes</code>)</li>
+</ol>
+<hr />
+<h2 id="boot-button-cheat-sheet">Boot Button Cheat Sheet</h2>
+<p>Single button on the device, multi-function based on press pattern:</p>
+<table>
+<thead>
+<tr>
+<th>Press</th>
+<th>Action</th>
+<th>LED Feedback</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>1× short</strong></td>
+<td>Status check</td>
+<td>Brief color flash: 🔵 connected to MQTT, 🟢 WiFi only, 🟡 nothing</td>
+</tr>
+<tr>
+<td><strong>3× clicks</strong></td>
+<td>Toggle Power Source (battery ↔ wired)</td>
+<td>Solid 3 s: 🔴 wired, 🟢 battery</td>
+</tr>
+<tr>
+<td><strong>Hold 10 s</strong></td>
+<td>Factory reset (clears all NVS)</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>Note: pressing the button while the device is in deep sleep wakes it up
+(any press). Press patterns are recognized only while awake.</p>
+<hr />
+<h2 id="web-ui-reference">Web UI Reference</h2>
+<p>Access via <code>http://apollo-tmp-pro-1-mqtte-&lt;mac&gt;.local/</code> (or by IP).
+Default credentials: <code>admin</code> / <code>tmna</code> (override via <code>Web Auth Username</code>
+/ <code>Web Auth Password</code>).</p>
+<h3 id="configuration">Configuration</h3>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Power Source</strong></td>
+<td>battery</td>
+<td>battery / wired</td>
+</tr>
+<tr>
+<td><strong>Column ID</strong></td>
+<td>Not Set</td>
+<td>Dropdown of pre-defined IDs (A1…M13)</td>
+</tr>
+<tr>
+<td><strong>Custom Column ID</strong></td>
+<td>empty</td>
+<td>Text override; takes precedence if non-empty</td>
+</tr>
+<tr>
+<td><strong>Sleep Duration</strong></td>
+<td>30 min</td>
+<td>Battery wake interval</td>
+</tr>
+<tr>
+<td><strong>Max Wake Time</strong></td>
+<td>45 s</td>
+<td>Battery hard cap before forced sleep</td>
+</tr>
+<tr>
+<td><strong>Warm-up Delay</strong></td>
+<td>20 s</td>
+<td>SEN55 fan stabilization before sample</td>
+</tr>
+<tr>
+<td><strong>Publish Interval</strong></td>
+<td>10 s</td>
+<td>Wired-mode re-publish rate</td>
+</tr>
+<tr>
+<td><strong>Drain Alarm Threshold</strong></td>
+<td>1.5 %/h</td>
+<td>Drain rate trigger</td>
+</tr>
+<tr>
+<td><strong>Drain Alarm Min Drop</strong></td>
+<td>3 %</td>
+<td>Drain rate-trigger noise floor</td>
+</tr>
+<tr>
+<td><strong>Wired Drop Threshold</strong></td>
+<td>5 %</td>
+<td>Cumulative drop trigger (wired-only)</td>
+</tr>
+<tr>
+<td><strong>Critical Battery Threshold</strong></td>
+<td>5 %</td>
+<td>Trips critical-battery handler</td>
+</tr>
+<tr>
+<td><strong>Critical Battery Sleep Duration</strong></td>
+<td>60 min</td>
+<td>Sleep extension when critical</td>
+</tr>
+<tr>
+<td><strong>Battery LED on Wake</strong></td>
+<td>OFF</td>
+<td>Show battery color LED on each wake</td>
+</tr>
+<tr>
+<td><strong>Use Static IP</strong></td>
+<td>OFF</td>
+<td>Apply static IP on next reboot</td>
+</tr>
+<tr>
+<td><strong>Static IP / Gateway / Subnet / DNS1 / DNS2</strong></td>
+<td>empty</td>
+<td>Used if static IP enabled</td>
+</tr>
+<tr>
+<td><strong>MQTT Broker / Port / Username / Password</strong></td>
+<td>empty</td>
+<td>Override <code>!secret</code> defaults</td>
+</tr>
+<tr>
+<td><strong>Web Auth Username / Password</strong></td>
+<td>empty</td>
+<td>Override compiled defaults</td>
+</tr>
+<tr>
+<td><strong>Deployment Notes</strong></td>
+<td>empty</td>
+<td>Free text for tech notes</td>
+</tr>
+<tr>
+<td><strong>Verbose Logging</strong></td>
+<td>ON</td>
+<td>DEBUG-level logs (off = WARN only)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="diagnostic-read-only">Diagnostic — Read-only</h3>
+<table>
+<thead>
+<tr>
+<th>Sensor</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Battery level / voltage</td>
+<td>MAX17048</td>
+</tr>
+<tr>
+<td>Temperature / Relative Humidity</td>
+<td>SHT3x probe</td>
+</tr>
+<tr>
+<td>ESP Temperature</td>
+<td>Internal die temp</td>
+</tr>
+<tr>
+<td>PM 0.3-1 / 1-2.5 / 2.5-4 / 4-10 / Total</td>
+<td>SEN55</td>
+</tr>
+<tr>
+<td>Lifetime Min/Max Battery + Voltage</td>
+<td>NVS-tracked</td>
+</tr>
+<tr>
+<td>Drain Trigger Count</td>
+<td>NVS-tracked counter</td>
+</tr>
+<tr>
+<td>SEN55 / SHT3x / MAX17048 Fail Count</td>
+<td>Consecutive read failures</td>
+</tr>
+<tr>
+<td>Drain Alarm Triggered (this wake)</td>
+<td>Live binary flag</td>
+</tr>
+<tr>
+<td>Critical Battery (this wake)</td>
+<td>Live binary flag</td>
+</tr>
+<tr>
+<td>Wake Reason</td>
+<td>timer / button / cold_boot / other</td>
+</tr>
+<tr>
+<td>Health Status</td>
+<td>OK / DEGRADED / CRITICAL</td>
+</tr>
+<tr>
+<td>Last Drain Trigger</td>
+<td>"Never" or "Boot #N (M wakes ago)"</td>
+</tr>
+<tr>
+<td>Uptime</td>
+<td>Since this wake</td>
+</tr>
+<tr>
+<td>Device ID</td>
+<td>MAC address</td>
+</tr>
+<tr>
+<td>IP Address</td>
+<td>Current network IP</td>
+</tr>
+</tbody>
+</table>
+<h3 id="buttons">Buttons</h3>
+<table>
+<thead>
+<tr>
+<th>Button</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>ESP Reboot</strong></td>
+<td>Soft restart</td>
+</tr>
+<tr>
+<td><strong>Publish Now</strong></td>
+<td>Force a <code>publish_mqtt_data</code> run</td>
+</tr>
+<tr>
+<td><strong>Force Sleep</strong></td>
+<td>End wake immediately + flip to battery</td>
+</tr>
+<tr>
+<td><strong>Clean SEN55 Fan</strong></td>
+<td>Trigger SEN55 fan cleaning cycle</td>
+</tr>
+<tr>
+<td><strong>Test Buzzer / Stop Buzzer</strong></td>
+<td>Sound test</td>
+</tr>
+<tr>
+<td><strong>Restart SEN55</strong></td>
+<td>Recover wedged sensor without rebooting device</td>
+</tr>
+<tr>
+<td><strong>Test LED</strong></td>
+<td>Cycle R/G/B to verify hardware</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="mqtt-topic-reference">MQTT Topic Reference</h2>
+<p>All topics use the prefix <code>apollo/temp-pro-1/&lt;device-id&gt;/</code> where
+<code>&lt;device-id&gt;</code> is the configured Column ID (or MAC suffix if unset).</p>
+<h3 id="sensor-data-published-per-wake">Sensor Data (published per wake)</h3>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>sensor/pm_&lt;range&gt;</code></td>
+<td>float (µg/m³)</td>
+<td>PM mass for sub-ranges 0.3-1, 1-2.5, 2.5-4, 4-10</td>
+</tr>
+<tr>
+<td><code>sensor/total_pm</code></td>
+<td>float (µg/m³)</td>
+<td>Cumulative PM ≤ 10 µm</td>
+</tr>
+<tr>
+<td><code>sensor/temperature</code></td>
+<td>float (°F)</td>
+<td>SHT3x reading (-1 sentinel if NaN)</td>
+</tr>
+<tr>
+<td><code>sensor/humidity</code></td>
+<td>float (%)</td>
+<td>SHT3x reading (-1 sentinel if NaN)</td>
+</tr>
+<tr>
+<td><code>sensor/battery</code></td>
+<td>int (%)</td>
+<td>MAX17048 SoC</td>
+</tr>
+<tr>
+<td><code>sensor/battery_voltage</code></td>
+<td>float (V)</td>
+<td>MAX17048 voltage</td>
+</tr>
+</tbody>
+</table>
+<h3 id="meta-static-slow-changing-retained">Meta — Static / Slow-Changing (retained)</h3>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meta/online</code></td>
+<td>"true" / "false"</td>
+<td>Per-device LWT — auto-published "false" by broker on disconnect</td>
+</tr>
+<tr>
+<td><code>meta/power_source</code></td>
+<td>"battery" / "wired"</td>
+<td>Current power mode</td>
+</tr>
+<tr>
+<td><code>meta/sleep_mode</code></td>
+<td>"ON" / "OFF"</td>
+<td>Legacy compat — derived from power_source</td>
+</tr>
+<tr>
+<td><code>meta/firmware_version</code></td>
+<td>string</td>
+<td>Project version</td>
+</tr>
+<tr>
+<td><code>meta/boot_count</code></td>
+<td>int</td>
+<td>Lifetime wake counter</td>
+</tr>
+<tr>
+<td><code>meta/wake_reason</code></td>
+<td>string</td>
+<td>timer / button / cold_boot / other_N</td>
+</tr>
+<tr>
+<td><code>meta/free_heap</code></td>
+<td>int (KB)</td>
+<td>RAM free at publish time</td>
+</tr>
+<tr>
+<td><code>meta/uptime_s</code></td>
+<td>int</td>
+<td>Seconds since this wake</td>
+</tr>
+<tr>
+<td><code>meta/wake_time_s</code></td>
+<td>float</td>
+<td>Same as uptime, float</td>
+</tr>
+<tr>
+<td><code>meta/sen55_serial</code></td>
+<td>string</td>
+<td>SEN55 hardware ID</td>
+</tr>
+<tr>
+<td><code>meta/sen55_fw</code></td>
+<td>string</td>
+<td>SEN55 firmware version</td>
+</tr>
+<tr>
+<td><code>meta/ip_address</code></td>
+<td>string</td>
+<td>Current network IP</td>
+</tr>
+<tr>
+<td><code>meta/mac_address</code></td>
+<td>string</td>
+<td>Device MAC</td>
+</tr>
+<tr>
+<td><code>meta/column_id</code></td>
+<td>string</td>
+<td>Configured column ID</td>
+</tr>
+<tr>
+<td><code>meta/notes</code></td>
+<td>string</td>
+<td>Deployment notes field</td>
+</tr>
+<tr>
+<td><code>meta/device_name</code></td>
+<td>string</td>
+<td>ESPHome device name</td>
+</tr>
+</tbody>
+</table>
+<h3 id="meta-diagnostic-counters-retained">Meta — Diagnostic Counters (retained)</h3>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meta/drain_trigger_count</code></td>
+<td>Lifetime count of drain alarm trips</td>
+</tr>
+<tr>
+<td><code>meta/drain_last_trigger_boot</code></td>
+<td>Boot number when alarm last fired (0 = never)</td>
+</tr>
+<tr>
+<td><code>meta/sen55_fail_count</code> / <code>meta/sht_fail_count</code> / <code>meta/max17048_fail_count</code></td>
+<td>Consecutive NaN reads (cleared on success)</td>
+</tr>
+<tr>
+<td><code>meta/lifetime_min_battery_pct</code> / <code>_max_battery_pct</code></td>
+<td>Lowest/highest battery % seen</td>
+</tr>
+<tr>
+<td><code>meta/lifetime_min_battery_v</code> / <code>_max_battery_v</code></td>
+<td>Lowest/highest voltage seen</td>
+</tr>
+</tbody>
+</table>
+<h3 id="meta-configured-values-retained">Meta — Configured Values (retained)</h3>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meta/config_sleep_duration_min</code></td>
+<td>Configured sleep duration</td>
+</tr>
+<tr>
+<td><code>meta/config_max_wake_time_s</code></td>
+<td>Configured wake-time cap</td>
+</tr>
+<tr>
+<td><code>meta/config_drain_threshold_pct_per_h</code></td>
+<td>Configured drain rate threshold</td>
+</tr>
+<tr>
+<td><code>meta/config_drain_min_drop_pct</code></td>
+<td>Configured drain min drop</td>
+</tr>
+<tr>
+<td><code>meta/config_wired_drop_threshold_pct</code></td>
+<td>Configured wired-cumulative trigger</td>
+</tr>
+<tr>
+<td><code>meta/config_critical_battery_threshold_pct</code></td>
+<td>Configured critical battery threshold</td>
+</tr>
+<tr>
+<td><code>meta/config_critical_battery_sleep_min</code></td>
+<td>Configured critical battery sleep</td>
+</tr>
+<tr>
+<td><code>meta/config_warmup_delay_s</code></td>
+<td>Configured SEN55 warmup</td>
+</tr>
+<tr>
+<td><code>meta/config_publish_interval_s</code></td>
+<td>Configured wired publish interval</td>
+</tr>
+</tbody>
+</table>
+<p>Use these for fleet config audit:</p>
+<pre><code class="language-bash">mosquitto_sub -t '+/meta/config_drain_threshold_pct_per_h' -v
+</code></pre>
+<h3 id="status-health-flags-retained">Status — Health Flags (retained)</h3>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Values</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status/health</code></td>
+<td>OK / DEGRADED / CRITICAL</td>
+<td>Single-glance rollup</td>
+</tr>
+<tr>
+<td><code>status/drain_protection</code></td>
+<td>OK / TRIGGERED</td>
+<td>TRIGGERED only during the wake the alarm fired</td>
+</tr>
+<tr>
+<td><code>status/sen55_errors</code></td>
+<td>hex string</td>
+<td>SEN55 device status register (0 = healthy)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="units-reference">Units — Reference</h3>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meta/unit_pm</code></td>
+<td>"ug/m3"</td>
+</tr>
+<tr>
+<td><code>meta/unit_battery</code></td>
+<td>"%"</td>
+</tr>
+<tr>
+<td><code>meta/unit_temperature</code></td>
+<td>"F"</td>
+</tr>
+<tr>
+<td><code>meta/unit_humidity</code></td>
+<td>"%"</td>
+</tr>
+</tbody>
+</table>
+<h3 id="commands-accepted-topics-all-under-apollotemp-pro-1">Commands (accepted topics, all under <code>apollo/temp-pro-1/</code>)</h3>
+<p>Three flavors of every command for fleet targeting:
+- <code>command/&lt;cmd&gt;</code> — every device
+- <code>battery/command/&lt;cmd&gt;</code> — battery devices only
+- <code>wired/command/&lt;cmd&gt;</code> — wired devices only</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Payload</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>power_source</code></td>
+<td><code>battery</code> / <code>wired</code> (or <code>ON</code>/<code>OFF</code>)</td>
+<td>Set power mode</td>
+</tr>
+<tr>
+<td><code>prevent_sleep</code></td>
+<td><code>ON</code> / <code>OFF</code></td>
+<td>Legacy — <code>ON</code> → wired, <code>OFF</code> → battery</td>
+</tr>
+<tr>
+<td><code>sleep_duration</code></td>
+<td>minutes (1–1440)</td>
+<td>Set wake interval</td>
+</tr>
+<tr>
+<td><code>restart</code></td>
+<td>(any)</td>
+<td>Reboot device</td>
+</tr>
+<tr>
+<td><code>light/on</code> / <code>light/off</code></td>
+<td>(any)</td>
+<td>RGB LED</td>
+</tr>
+<tr>
+<td><code>light/red</code> / <code>light/green</code> / <code>light/blue</code></td>
+<td>(any)</td>
+<td>RGB LED solid color</td>
+</tr>
+<tr>
+<td><code>light/rgb</code></td>
+<td>"r,g,b" 0-255</td>
+<td>RGB LED custom</td>
+</tr>
+<tr>
+<td><code>light/effect</code></td>
+<td>"Slow Pulse" / "Fast Pulse" / "none"</td>
+<td>RGB LED animation</td>
+</tr>
+<tr>
+<td><code>buzzer</code></td>
+<td>RTTTL string OR "beep" / "siren" / "success" / "error"</td>
+<td>Play sound</td>
+</tr>
+<tr>
+<td><code>buzzer/stop</code></td>
+<td>(any)</td>
+<td>Stop sound</td>
+</tr>
+<tr>
+<td><code>column_id</code></td>
+<td>string</td>
+<td>Set Column ID</td>
+</tr>
+<tr>
+<td><code>custom_column_id</code></td>
+<td>string</td>
+<td>Set custom column ID text</td>
+</tr>
+<tr>
+<td><code>deployment_notes</code></td>
+<td>string</td>
+<td>Set notes field</td>
+</tr>
+<tr>
+<td><code>warmup_delay</code></td>
+<td>seconds</td>
+<td>Set SEN55 warmup</td>
+</tr>
+<tr>
+<td><code>max_wake_time</code></td>
+<td>seconds</td>
+<td>Set wake cap</td>
+</tr>
+<tr>
+<td><code>battery_led_on_wake</code></td>
+<td><code>ON</code> / <code>OFF</code></td>
+<td>Toggle wake-time LED</td>
+</tr>
+<tr>
+<td><code>publish_interval</code></td>
+<td>seconds</td>
+<td>Set wired publish interval</td>
+</tr>
+<tr>
+<td><code>mqtt_broker</code> / <code>mqtt_port</code> / <code>mqtt_username</code> / <code>mqtt_password</code></td>
+<td>string / int</td>
+<td>Override broker config (takes effect after reboot)</td>
+</tr>
+<tr>
+<td><code>web_auth_username</code> / <code>web_auth_password</code></td>
+<td>string</td>
+<td>Override web auth (after reboot)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="safety-features">Safety Features</h2>
+<p>The device has overlapping protections for accidental drain. From most
+restrictive to least:</p>
+<h3 id="1-wake-time-cap-battery-devices">1. Wake-time cap (battery devices)</h3>
+<p>If <code>power_source = battery</code>, the device <strong>always</strong> sleeps within
+<code>Max Wake Time</code> (default 45 s). No MQTT command, no stuck retained
+message, no firmware bug can keep it awake longer.</p>
+<h3 id="2-drain-detector-all-devices">2. Drain detector (all devices)</h3>
+<p>Every wake (battery) or every 5 min (wired), checks battery drop and rate:</p>
+<ul>
+<li><strong>Rate trigger</strong>: drop ≥ 3% AND rate ≥ 1.5 %/h → flip to battery</li>
+<li><strong>Wired-cumulative trigger</strong>: drop ≥ 5% on a wired device → flip to battery</li>
+</ul>
+<p>When triggered:
+- <code>power_source</code> flipped to <code>battery</code>
+- <code>drain_trigger_count</code> incremented
+- <code>status/drain_protection</code> published as <code>TRIGGERED</code>
+- Device sleeps on next safety-net cycle</p>
+<h3 id="3-critical-battery-all-devices">3. Critical battery (all devices)</h3>
+<p>If battery drops below <code>Critical Battery Threshold</code> (default 5%):
+- Flip <code>power_source</code> to <code>battery</code> if not already
+- Extend next sleep to <code>Critical Battery Sleep Duration</code> (default 60 min)
+- Publish <code>status/critical_battery = TRIGGERED</code>
+- Still publishes data each wake (operator sees the alert)</p>
+<h3 id="4-boot-loop-detection">4. Boot-loop detection</h3>
+<p>3+ consecutive <code>cold_boot</code> wakes (no normal timer wake in between):
+- Detected as a crash loop
+- Flip to battery
+- Force 30-min cooldown sleep
+- Counter clears on the first healthy timer/button wake</p>
+<h3 id="5-lwt-last-will-testament">5. LWT (Last Will &amp; Testament)</h3>
+<p>On every connect: device publishes <code>meta/online = true</code>. If the connection
+drops ungracefully (network outage, power loss), the broker auto-publishes
+<code>meta/online = false</code>. Subscribers can tell "device offline" from "device
+sleeping but alive."</p>
+<h3 id="6-retained-command-scrub">6. Retained-command scrub</h3>
+<p>On every successful MQTT connect, the device clears any retained command
+messages at the broker. Defends against the original "stale retained
+prevent_sleep=ON drained the fleet overnight" failure mode.</p>
+<hr />
+<h2 id="common-operator-workflows">Common Operator Workflows</h2>
+<h3 id="deploy-a-new-battery-unit-most-common">Deploy a new battery unit (most common)</h3>
+<ol>
+<li>Flash firmware (or use pre-flashed unit)</li>
+<li>Power on</li>
+<li>Open web UI, set <code>Column ID</code>, save</li>
+<li>Done. Device wakes every 30 min, publishes, sleeps.</li>
+</ol>
+<h3 id="deploy-a-wired-poeusb-unit">Deploy a wired (PoE/USB) unit</h3>
+<p>Same as above, plus:
+- 3× boot button (or web UI) to set <code>Power Source</code> = wired
+- Confirm log shows <code>Power Src: wired</code></p>
+<h3 id="wake-up-battery-devices-for-live-debugging">Wake up battery devices for live debugging</h3>
+<p>Subscribe to <code>+/meta/online</code> to see who's connected. Then publish:</p>
+<pre><code class="language-bash">mosquitto_pub -t apollo/temp-pro-1/battery/command/power_source -m wired -r
+</code></pre>
+<p>The retained message stays at the broker. Each battery device, on its next
+30-min wake, picks it up and flips to <code>wired</code> mode (stays awake).</p>
+<p>When done, clear the command:</p>
+<pre><code class="language-bash">mosquitto_pub -t apollo/temp-pro-1/battery/command/power_source -m &quot;&quot; -r -n
+</code></pre>
+<p>Then explicitly send each device back to battery:</p>
+<pre><code class="language-bash">mosquitto_pub -t apollo/temp-pro-1/battery/command/power_source -m battery
+</code></pre>
+<h3 id="find-unhealthy-units-in-a-fleet">Find unhealthy units in a fleet</h3>
+<pre><code class="language-bash"># All currently CRITICAL
+mosquitto_sub -t '+/status/health' -v -W 5 | grep CRITICAL
+
+# All that have ever tripped drain alarm
+mosquitto_sub -t '+/meta/drain_trigger_count' -v -W 5 | awk '$2 != &quot;0&quot;'
+
+# All currently offline (per LWT)
+mosquitto_sub -t '+/meta/online' -v -W 5 | grep false
+</code></pre>
+<h3 id="audit-fleet-config">Audit fleet config</h3>
+<p>Confirm all devices have the same drain threshold:</p>
+<pre><code class="language-bash">mosquitto_sub -t '+/meta/config_drain_threshold_pct_per_h' -v -W 5
+</code></pre>
+<h3 id="identify-drained-then-recovered-units">Identify drained-then-recovered units</h3>
+<p>These units have <code>drain_trigger_count</code> &gt; 0 but currently <code>health = OK</code>:</p>
+<pre><code class="language-bash"># Subset 1: had drain history
+mosquitto_sub -t '+/meta/drain_trigger_count' -v -W 5 | awk '$2 != &quot;0&quot;'
+
+# Cross-reference with currently OK
+mosquitto_sub -t '+/status/health' -v -W 5 | grep OK
+</code></pre>
+<h3 id="fully-reset-a-single-unit">Fully reset a single unit</h3>
+<p>10-second hold on the boot button → factory reset. Wipes all NVS
+including Column ID, MQTT settings, lifetime stats. Use only when fully
+redeploying.</p>
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="device-not-publishing-to-mqtt">Device not publishing to MQTT</h3>
+<p>Check, in order:
+1. <strong>Network</strong>: device's web UI shows IP? Ethernet link LEDs?
+2. <strong>DNS</strong>: log shows <code>Couldn't resolve IP address for &lt;broker&gt;</code> ? → DNS misconfigured. Use IP directly via <code>MQTT Broker</code> web UI override.
+3. <strong>Auth</strong>: log shows authentication errors? → Check broker username/password.
+4. <strong>Firewall</strong>: device on different VLAN than broker? → Open port 1883.
+5. <strong>Sleeping</strong>: battery device just sleeping. Wait for next wake (≤30 min).</p>
+<h3 id="battery-dies-faster-than-expected">Battery dies faster than expected</h3>
+<p>Check <code>Drain Trigger Count</code> per device. Non-zero means the drain detector
+caught something. Subscribe to <code>meta/wake_reason</code> — lots of <code>cold_boot</code>
+indicates crashes. Check <code>Lifetime Min Battery</code> for actual low watermark.</p>
+<h3 id="health-degraded-right-after-a-reboot">"Health: DEGRADED" right after a reboot</h3>
+<p>Expected. The boot button reset increments <code>rapid_boot_count</code>, which
+flags DEGRADED briefly. Clears automatically on the next healthy sensor
+read (~30 min on battery, ~5 min on wired).</p>
+<h3 id="health-critical-right-after-firmware-update">"Health: CRITICAL" right after firmware update</h3>
+<p>Most likely the boot-loop detector hit 3 cold boots (firmware updates +
+reboots count). Wait 30 min — one normal timer wake clears it. Or 10s
+boot-button factory reset for an immediate clear.</p>
+<h3 id="drain-alarm-fires-too-often-too-rarely">Drain alarm fires too often / too rarely</h3>
+<p>Tune in web UI:
+- More sensitive: lower <code>Drain Alarm Threshold</code> (default 1.5 %/h) or
+  <code>Drain Alarm Min Drop</code> (default 3%)
+- Less sensitive: raise both
+- For wired-specific: <code>Wired Drop Threshold</code> (default 5%)</p>
+<h3 id="lifetime-min-battery-shows-skewed-value-eg-0-from-a-prior-incident">Lifetime min battery shows skewed value (e.g., 0%) from a prior incident</h3>
+<p>Cosmetic — doesn't affect operation. Will normalize over time. Or factory
+reset for a clean slate.</p>
+<h3 id="wired-drop-threshold-trips-on-a-healthy-unit">"Wired Drop Threshold" trips on a healthy unit</h3>
+<p>The MAX17048 has 1-2% noise per reading, but baseline only updates on
+≥5% rises. If a wired unit charged from low and drifted while staying near
+full, the baseline could be slightly below current. Acceptable false positive;
+will normalize on next charge cycle.</p>
+<h3 id="boot-button-doesnt-wake-device">Boot button doesn't wake device</h3>
+<p>If the boot button doesn't wake from deep sleep:
+- Check the unit isn't dead (LiPo at 0%)
+- Check the boot button isn't physically stuck
+- Try external reset (RST pin) — that's a hard cold-boot</p>
+<h3 id="mqtt-broker-ip-changed">MQTT broker IP changed</h3>
+<p>Web UI: update <code>MQTT Broker</code> field. Reboot via <code>ESP Reboot</code> button.
+Or via MQTT (works only if currently connected to old broker):</p>
+<pre><code class="language-bash">mosquitto_pub -t apollo/temp-pro-1/&lt;id&gt;/command/mqtt_broker -m new-broker.example.com
+mosquitto_pub -t apollo/temp-pro-1/&lt;id&gt;/command/restart -m 1
+</code></pre>
+<h3 id="device-stuck-in-wired-mode-but-is-supposed-to-be-battery">Device stuck in wired mode but is supposed to be battery</h3>
+<p>The drain detector will catch it eventually (~30 min – 2 hr depending on
+load). Or:
+- Web UI: change <code>Power Source</code> to <code>battery</code>
+- 3× boot button
+- MQTT: <code>mosquitto_pub -t apollo/temp-pro-1/&lt;id&gt;/command/power_source -m battery</code></p>
+<h3 id="device-is-in-battery-mode-but-should-be-wired">Device is in battery mode but should be wired</h3>
+<p>The drain detector flipped it. Check <code>Drain Trigger Count</code> — non-zero
+confirms. Investigate why drain happened (lost PoE? bad USB cable?) before
+flipping back, or it'll just trigger again.</p>
+<hr />
+<h2 id="reference-compile-flash">Reference: Compile + Flash</h2>
+<pre><code class="language-bash"># Compile only (no flash)
+esphome compile TEMP_PRO-1_MQTT_ETH.yaml
+
+# Flash via USB
+esphome upload TEMP_PRO-1_MQTT_ETH.yaml
+
+# Flash over network (OTA)
+esphome upload TEMP_PRO-1_MQTT_ETH.yaml --device &lt;device-ip&gt;
+
+# Stream live logs (with timestamps from your laptop)
+esphome logs TEMP_PRO-1_MQTT_ETH.yaml
+
+# Erase all flash (full clean slate including NVS)
+esptool.py --port /dev/cu.usbmodemXXXX erase_flash
+</code></pre>
+<hr />
+<h2 id="appendix-topic-examples">Appendix: Topic Examples</h2>
+<p>Replace <code>&lt;id&gt;</code> with the device's Column ID or MAC suffix.</p>
+<pre><code class="language-bash"># Subscribe to all data from one device
+mosquitto_sub -t 'apollo/temp-pro-1/&lt;id&gt;/#' -v
+
+# Subscribe to all data from all devices
+mosquitto_sub -t 'apollo/temp-pro-1/+/#' -v
+
+# Watch all devices' battery percentages
+mosquitto_sub -t 'apollo/temp-pro-1/+/sensor/battery' -v
+
+# Watch all devices' health rollups
+mosquitto_sub -t 'apollo/temp-pro-1/+/status/health' -v
+
+# Send wake-up to all battery devices
+mosquitto_pub -t 'apollo/temp-pro-1/battery/command/power_source' -m wired -r
+
+# Restart everyone
+mosquitto_pub -t 'apollo/temp-pro-1/command/restart' -m 1
+
+# Set sleep duration to 1 hour for all battery devices
+mosquitto_pub -t 'apollo/temp-pro-1/battery/command/sleep_duration' -m 60
+</code></pre>
+</body>
+</html>
