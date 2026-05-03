@@ -13,28 +13,142 @@ esphome:
   min_version: 2025.2.0
 
   on_boot:
+    # Priority 1200 — runs very early, before most components init.
+    # Releases the GPIO7 deep-sleep hold and logs the wake cause for forensics.
+    - priority: 1200
+      then:
+        - lambda: |-
+            // Release GPIO7 hold from deep sleep (no-op on first boot)
+            gpio_hold_dis(GPIO_NUM_7);
+            esp_sleep_wakeup_cause_t wc = esp_sleep_get_wakeup_cause();
+            const char *cause;
+            if (wc == ESP_SLEEP_WAKEUP_TIMER) {
+              cause = "deep sleep timer";
+            } else if (wc == ESP_SLEEP_WAKEUP_EXT0) {
+              cause = "button press";
+            } else {
+              esp_reset_reason_t rr = esp_reset_reason();
+              if (rr == ESP_RST_POWERON)      cause = "power-on";
+              else if (rr == ESP_RST_SW)      cause = "software restart";
+              else if (rr == ESP_RST_DEEPSLEEP) cause = "deep sleep (unknown source)";
+              else                             cause = "other";
+            }
+            ESP_LOGW("Apollo", "Wake cause: %s — GPIO7 hold released", cause);
+
+    # Priority 700 — runs before the MQTT client connects (priority ~250).
+    # Applies user-configurable broker/credential/web-auth overrides and
+    # programmatically configures per-device LWT and birth messages so
+    # subscribers can tell "device offline" from "device sleeping but alive."
+    - priority: 700
+      then:
+        - lambda: |-
+            // ----- MQTT credentials -----
+            if (!id(mqtt_broker_override).state.empty()) {
+              id(mqtt_client)->set_broker_address(id(mqtt_broker_override).state);
+              ESP_LOGW("Apollo", "MQTT broker override: %s", id(mqtt_broker_override).state.c_str());
+            }
+            if (id(mqtt_port_override).state > 0) {
+              uint16_t p = (uint16_t)id(mqtt_port_override).state;
+              id(mqtt_client)->set_broker_port(p);
+              ESP_LOGW("Apollo", "MQTT port override: %u", p);
+            }
+            if (!id(mqtt_username_override).state.empty()) {
+              id(mqtt_client)->set_username(id(mqtt_username_override).state);
+              ESP_LOGW("Apollo", "MQTT username override applied");
+            }
+            if (!id(mqtt_password_override).state.empty()) {
+              id(mqtt_client)->set_password(id(mqtt_password_override).state);
+              ESP_LOGW("Apollo", "MQTT password override applied");
+            }
+
+            // ----- Web server auth -----
+            if (web_server_base::global_web_server_base) {
+              if (!id(web_auth_username_override).state.empty()) {
+                web_server_base::global_web_server_base->set_auth_username(
+                  id(web_auth_username_override).state);
+                ESP_LOGW("Apollo", "Web auth username override applied");
+              }
+              if (!id(web_auth_password_override).state.empty()) {
+                web_server_base::global_web_server_base->set_auth_password(
+                  id(web_auth_password_override).state);
+                ESP_LOGW("Apollo", "Web auth password override applied");
+              }
+            }
+
+            // ----- LWT and birth message (per-device) -----
+            // Set programmatically because the YAML birth_message/will_message
+            // can't reach the runtime device name (which has the MAC suffix).
+            // App.get_name() returns e.g. "apollo-temp-pro-1-mqtt-a1b2c3", giving
+            // each unit a unique online/offline topic the broker can manage on
+            // ungraceful disconnect.
+            {
+              std::string online_topic = std::string("apollo/temp-pro-1/") + App.get_name() + "/meta/online";
+              esphome::mqtt::MQTTMessage will;
+              will.topic = online_topic;
+              will.payload = "false";
+              will.qos = 1;
+              will.retain = true;
+              id(mqtt_client)->set_last_will(std::move(will));
+
+              esphome::mqtt::MQTTMessage birth;
+              birth.topic = online_topic;
+              birth.payload = "true";
+              birth.qos = 1;
+              birth.retain = true;
+              id(mqtt_client)->set_birth_message(std::move(birth));
+
+              ESP_LOGW("Apollo", "LWT/birth configured for: %s", online_topic.c_str());
+            }
+
+    # Priority -100 — runs after components init but before the main loop.
+    # Increments boot count, sets the sleep duration, captures the wake reason,
+    # checks for boot loops, and applies the wired-mode latch.
     - priority: -100
       then:
-        - delay: 2s
         - lambda: |-
-            id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 60 * 1000);
+            // Track wake count across deep sleep (persisted in NVS)
+            id(boot_count) += 1;
+            ESP_LOGW("Apollo", "Boot count: %u", (unsigned)id(boot_count));
+            // Sleep duration number is in MINUTES (matches Core_MQTT.yaml unit)
+            id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 1000);
+        # Capture WHY this wake happened (timer/button/cold_boot) — published
+        # as meta/wake_reason and shown in the diagnostic summary log.
+        - script.execute: capture_wake_reason
+        # Detect rapid-boot loops (≥3 consecutive cold boots). If detected,
+        # the script flips to battery and forces 30-min cooldown sleep.
+        - script.execute: check_boot_loop
+        # Wired-mode latch: if power_source is wired, prevent deep sleep so
+        # the device stays awake continuously.
         - if:
             condition:
-              switch.is_on: prevent_sleep
+              lambda: 'return id(power_source).current_option() == "wired";'
             then:
               - lambda: |-
-                  ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch On Boot");
+                  ESP_LOGW("Apollo", "Wired mode on boot — deep sleep prevented");
                   id(deep_sleep_1).prevent_deep_sleep();
+        # Battery sensor always updated (needed for MQTT publish + diagnostics)
+        - component.update: max_17048
+        # Read SEN55 serial + firmware once per wake (cached in globals)
+        - script.execute: read_sen55_info
+
+  # ESPHome runs on_shutdown handlers in priority-descending order. We cut
+  # accessory power AFTER MQTT teardown (priority ~250) but BEFORE deep sleep
+  # entry. Cutting power earlier hangs SPI shutdown on the W5500. (Same
+  # rationale as the ETH variant — it's the same hardware.)
+  on_shutdown:
+    - priority: 300
+      then:
         - lambda: |-
-            // Force initial updates on boot
-            id(sht_temperature).publish_state(id(sht_temperature_raw).state);
-            id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-            id(last_temp_update) = millis();
-            id(last_humidity_update) = millis();
+            gpio_set_direction(GPIO_NUM_7, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_7, 0);
+            gpio_hold_en(GPIO_NUM_7);
+            gpio_deep_sleep_hold_en();
+            ESP_LOGW("Apollo", "on_shutdown: accessory power OFF, GPIO7 held LOW");
 
 ota:
   - platform: esphome
     id: ota_esphome
+  - platform: web_server
 
 safe_mode:
 
@@ -43,6 +157,9 @@ logger:
 wifi:
   ap:
     ssid: "Apollo TEMP_PRO-1 MQTT Hotspot"
+  # Default 15-min auto-reboot on WiFi connection loss is bad for offline-
+  # capable devices — would cause endless reboot loops on outages. Disable.
+  reboot_timeout: 0s
 
 captive_portal:
 
@@ -58,7 +175,11 @@ mqtt:
   topic_prefix: null
   discovery: false
 
-  # Default 15-min auto-reboot is dangerous for offline-capable devices —
+  # NOTE: birth_message and will_message are set programmatically in on_boot
+  # priority 700 (above) using App.get_name() so each unit gets a per-device
+  # online/offline topic with the MAC suffix included.
+
+  # Default 15-min MQTT auto-reboot is dangerous for offline-capable devices —
   # broker outages would otherwise cause endless reboot loops. Disable.
   reboot_timeout: 0s
 
@@ -67,7 +188,9 @@ mqtt:
       - logger.log: "Connected to MQTT broker"
       # ---------------------------------------------------------------------
       # Self-heal scrub: clear retained command messages at the broker on
-      # every successful connect. See ETH variant for full rationale.
+      # every successful connect. Defense against retained-on commands from
+      # an old firmware or a misconfigured Ignition tag binding that would
+      # otherwise drain the battery on every wake.
       # ---------------------------------------------------------------------
       - lambda: |-
           auto clear = [](const char* topic) {
@@ -89,93 +212,68 @@ mqtt:
           // Class-scoped command topics
           clear("apollo/temp-pro-1/battery/command/prevent_sleep");
           clear("apollo/temp-pro-1/battery/command/sleep_duration");
+          clear("apollo/temp-pro-1/battery/command/power_source");
           clear("apollo/temp-pro-1/wired/command/prevent_sleep");
           clear("apollo/temp-pro-1/wired/command/sleep_duration");
+          clear("apollo/temp-pro-1/wired/command/power_source");
+          // New canonical power_source command
+          clear("apollo/temp-pro-1/command/power_source");
           ESP_LOGI("Apollo", "Cleared retained command topics at broker");
+      # Boot-loop cooldown: if check_boot_loop set this flag in on_boot, skip
+      # everything and go straight to sleep so whatever caused the loop has a
+      # chance to clear before another attempt.
       - if:
           condition:
-            switch.is_on: prevent_sleep
+            lambda: 'return id(boot_loop_force_sleep);'
           then:
-            - lambda: |-
-                ESP_LOGW("Apollo", "Preventing Deep Sleep Due To Switch");
-          else:
-            - switch.turn_on: accessory_power
-            - delay: 5s
-            # Update all sensor components
-            - component.update: sen55
-            - component.update: sht3xd_sensor
-            - component.update: dallas_temp_probe
-            - component.update: sen5x_number_component
-            - component.update: max_17048
-            # Wait for all sensors and device name to be ready (up to 20s)
-            - wait_until:
-                condition:
-                  lambda: |-
-                    return !std::isnan(id(pm0_3_to_0_5_number).state) &&
-                           !std::isnan(id(pm0_5_to_1_number).state) &&
-                           !std::isnan(id(pm1_to_2_5_number).state) &&
-                           !std::isnan(id(pm2_5_to_4_number).state) &&
-                           !std::isnan(id(pm4_to_10_number).state) &&
-                           !std::isnan(id(total_pm_count).state) &&
-                           !std::isnan(id(batt_pct).state) &&
-                           !id(device_mac_address).state.empty();
-                timeout: 20s
-            # Publish all MQTT data once
-            - script.execute: publish_mqtt_data
-            # Wait for MQTT messages to be sent
-            - delay: 2s
-            - lambda: |-
-                // Check alarm conditions directly
-                id(alarm_triggered_on_wake) = false;
-
-                // Check temperature alarm (only if value is valid)
-                if (id(alarm_outside_temp_range).state &&
-                    !std::isnan(id(sht_temperature).state) &&
-                    (id(sht_temperature).state > id(max_temp).state || id(sht_temperature).state < id(min_temp).state)) {
-                  id(alarm_triggered_on_wake) = true;
-                  ESP_LOGW("Apollo", "Temperature alarm triggered");
-                }
-
-                // Check humidity alarm (only if value is valid)
-                if (id(alarm_outside_humidity_range).state &&
-                    !std::isnan(id(sht_humidity).state) &&
-                    (id(sht_humidity).state > id(max_humidity).state || id(sht_humidity).state < id(min_humidity).state)) {
-                  id(alarm_triggered_on_wake) = true;
-                  ESP_LOGW("Apollo", "Humidity alarm triggered");
-                }
-
-                // Check PM mass alarm (only if value is valid)
-                if (id(alarm_outside_total_pm_range).state &&
-                    !std::isnan(id(pm_10_0).state) &&
-                    id(pm_10_0).state >= id(max_total_pm).state) {
-                  id(alarm_triggered_on_wake) = true;
-                  ESP_LOGW("Apollo", "PM mass alarm triggered");
-                }
-
-                // Check PM count alarm (only if value is valid)
-                if (id(alarm_outside_total_pm_count_range).state &&
-                    !std::isnan(id(total_pm_count).state) &&
-                    id(total_pm_count).state >= id(max_total_pm_count).state) {
-                  id(alarm_triggered_on_wake) = true;
-                  ESP_LOGW("Apollo", "PM count alarm triggered: %.0f >= %.0f", id(total_pm_count).state, id(max_total_pm_count).state);
-                }
-
-                if (id(alarm_triggered_on_wake)) {
-                  ESP_LOGW("Apollo", "Alarm Active - Staying Awake");
-                  id(deep_sleep_1).prevent_deep_sleep();
-                  // Trigger alarm sound and light
-                  id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
-                  id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
-                  id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;");
-                }
-            - if:
-                condition:
-                  and:
-                    - lambda: 'return !id(alarm_triggered_on_wake);'
-                    - switch.is_off: prevent_sleep
-                then:
-                  - deep_sleep.enter:
-                      id: deep_sleep_1
+            - lambda: 'ESP_LOGE("Apollo", "Boot loop active — sleeping 30 min for cooldown");'
+            - delay: 1s
+            - script.execute: prepare_and_sleep
+      # Wait for SEN55 to stabilize — duration configurable via "Warm-up Delay".
+      # Self-adjusts via millis(): if MQTT took longer than warmup to connect,
+      # the wait_until exits immediately.
+      - wait_until:
+          condition:
+            lambda: 'return millis() > (uint32_t)(id(warmup_delay_s).state * 1000);'
+          timeout: 60s
+      # Trigger stabilized sensor reads
+      - component.update: sen55
+      - component.update: sht3xd_sensor
+      - component.update: max_17048
+      # Safety check: ensure sensors actually returned valid (non-NaN) data
+      - wait_until:
+          condition:
+            lambda: |-
+              return !std::isnan(id(pm_1_0).state) &&
+                     !std::isnan(id(pm_2_5).state) &&
+                     !std::isnan(id(pm_4_0).state) &&
+                     !std::isnan(id(pm_10_0).state) &&
+                     !std::isnan(id(sht_temperature).state) &&
+                     !std::isnan(id(sht_humidity).state) &&
+                     !std::isnan(id(batt_pct).state) &&
+                     !id(device_mac_address).state.empty();
+          timeout: 10s
+      # Sensor health tracking — increments per-sensor consecutive-failure
+      # counters on NaN, clears them on success. Also updates lifetime
+      # battery min/max for cell-aging diagnostics.
+      - script.execute: track_sensor_health
+      # Critical-battery check — extends next sleep if battery is low.
+      - script.execute: check_critical_battery
+      # Drain-rate safety — must run AFTER battery is valid (so we have a
+      # current reading) and BEFORE publish (so the alarm status flag goes
+      # out in the same wake cycle if it trips).
+      - script.execute: check_battery_drain
+      # Publish all MQTT data once
+      - script.execute: publish_mqtt_data
+      # Wait for MQTT messages to be sent
+      - delay: 1s
+      # Battery devices sleep here. Wired devices skip — they stay awake and
+      # rely on the periodic publish-while-wired interval for ongoing data.
+      - if:
+          condition:
+            lambda: 'return id(power_source).current_option() == "battery";'
+          then:
+            - script.execute: prepare_and_sleep
 
   on_message:
     # Restart command
@@ -185,17 +283,72 @@ mqtt:
         - button.press: esp_reboot
 
     # ============================================================
-    # Prevent-sleep command — three flavors for fleet targeting.
-    # See ETH variant for full rationale.
+    # Power-mode commands. Two payload conventions, both supported:
+    #   • New: "battery" / "wired" → set power_source directly
+    #   • Legacy: "ON" (= wired) / "OFF" (= battery)
+    #
+    # Three topic flavors for fleet targeting:
+    #   • apollo/temp-pro-1/command/power_source         → all devices
+    #   • apollo/temp-pro-1/battery/command/power_source → battery devices only
+    #   • apollo/temp-pro-1/wired/command/power_source   → wired devices only
+    # Plus the legacy `prevent_sleep` topic on the same three flavors.
     # ============================================================
+    - topic: apollo/temp-pro-1/command/power_source
+      then:
+        - lambda: |-
+            std::string mode;
+            if (x == "wired" || x == "ON" || x == "on" || x == "1" || x == "true") {
+              mode = "wired";
+            } else if (x == "battery" || x == "OFF" || x == "off" || x == "0" || x == "false") {
+              mode = "battery";
+            } else {
+              ESP_LOGW("Apollo", "Unknown power_source payload: %s", x.c_str());
+              return;
+            }
+            auto call = id(power_source).make_call();
+            call.set_option(mode);
+            call.perform();
+
+    - topic: apollo/temp-pro-1/battery/command/power_source
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).current_option() == "battery";'
+            then:
+              - lambda: |-
+                  std::string mode;
+                  if (x == "wired" || x == "ON") mode = "wired";
+                  else if (x == "battery" || x == "OFF") mode = "battery";
+                  else return;
+                  auto call = id(power_source).make_call();
+                  call.set_option(mode);
+                  call.perform();
+
+    - topic: apollo/temp-pro-1/wired/command/power_source
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).current_option() == "wired";'
+            then:
+              - lambda: |-
+                  std::string mode;
+                  if (x == "wired" || x == "ON") mode = "wired";
+                  else if (x == "battery" || x == "OFF") mode = "battery";
+                  else return;
+                  auto call = id(power_source).make_call();
+                  call.set_option(mode);
+                  call.perform();
+
+    # Legacy prevent_sleep topics — same effect, routed to power_source.
+    # ON  → wired, OFF → battery. Kept for backward compatibility with
+    # older operator scripts and Ignition tag bindings.
     - topic: apollo/temp-pro-1/command/prevent_sleep
       then:
         - lambda: |-
-            if (x == "ON" || x == "on" || x == "1" || x == "true") {
-              id(prevent_sleep).turn_on();
-            } else {
-              id(prevent_sleep).turn_off();
-            }
+            std::string mode = (x == "ON" || x == "on" || x == "1" || x == "true") ? "wired" : "battery";
+            auto call = id(power_source).make_call();
+            call.set_option(mode);
+            call.perform();
 
     - topic: apollo/temp-pro-1/battery/command/prevent_sleep
       then:
@@ -204,11 +357,10 @@ mqtt:
               lambda: 'return id(power_source).current_option() == "battery";'
             then:
               - lambda: |-
-                  if (x == "ON" || x == "on" || x == "1" || x == "true") {
-                    id(prevent_sleep).turn_on();
-                  } else {
-                    id(prevent_sleep).turn_off();
-                  }
+                  std::string mode = (x == "ON" || x == "on") ? "wired" : "battery";
+                  auto call = id(power_source).make_call();
+                  call.set_option(mode);
+                  call.perform();
 
     - topic: apollo/temp-pro-1/wired/command/prevent_sleep
       then:
@@ -217,53 +369,48 @@ mqtt:
               lambda: 'return id(power_source).current_option() == "wired";'
             then:
               - lambda: |-
-                  if (x == "ON" || x == "on" || x == "1" || x == "true") {
-                    id(prevent_sleep).turn_on();
-                  } else {
-                    id(prevent_sleep).turn_off();
-                  }
+                  std::string mode = (x == "ON" || x == "on") ? "wired" : "battery";
+                  auto call = id(power_source).make_call();
+                  call.set_option(mode);
+                  call.perform();
 
-    # RGB Light ON - turns on white at full brightness
+    # RGB Light controls
     - topic: apollo/temp-pro-1/command/light/on
       then:
         - light.turn_on:
             id: rgb_light
-            brightness: 100%
+            brightness: 25%
             red: 100%
             green: 100%
             blue: 100%
 
-    # RGB Light OFF
     - topic: apollo/temp-pro-1/command/light/off
       then:
         - light.turn_off: rgb_light
 
-    # RGB Light RED
     - topic: apollo/temp-pro-1/command/light/red
       then:
         - light.turn_on:
             id: rgb_light
-            brightness: 100%
+            brightness: 25%
             red: 100%
             green: 0%
             blue: 0%
 
-    # RGB Light GREEN
     - topic: apollo/temp-pro-1/command/light/green
       then:
         - light.turn_on:
             id: rgb_light
-            brightness: 100%
+            brightness: 25%
             red: 0%
             green: 100%
             blue: 0%
 
-    # RGB Light BLUE
     - topic: apollo/temp-pro-1/command/light/blue
       then:
         - light.turn_on:
             id: rgb_light
-            brightness: 100%
+            brightness: 25%
             red: 0%
             green: 0%
             blue: 100%
@@ -276,7 +423,7 @@ mqtt:
             if (sscanf(x.c_str(), "%d,%d,%d", &r, &g, &b) == 3) {
               auto call = id(rgb_light).turn_on();
               call.set_rgb(r / 255.0f, g / 255.0f, b / 255.0f);
-              call.set_brightness(1.0f);
+              call.set_brightness(0.25f);
               call.perform();
               ESP_LOGI("Apollo", "Light set to RGB(%d,%d,%d)", r, g, b);
             }
@@ -295,17 +442,44 @@ mqtt:
             call.perform();
             ESP_LOGI("Apollo", "Light effect set to: %s", effect.c_str());
 
-    # Sleep duration control - payload: hours (e.g., "1", "0.5", "2.5")
+    # Sleep duration control — payload: minutes (e.g., "30", "60").
+    # Three class-scoped flavors (broadcast / battery / wired).
     - topic: apollo/temp-pro-1/command/sleep_duration
       then:
         - lambda: |-
-            float hours = atof(x.c_str());
-            if (hours >= 0.01 && hours <= 24) {
-              id(deep_sleep_sleep_duration).publish_state(hours);
-              ESP_LOGI("Apollo", "Sleep duration set to %.2f hours", hours);
+            float minutes = atof(x.c_str());
+            if (minutes >= 1 && minutes <= 1440) {
+              id(deep_sleep_sleep_duration).publish_state(minutes);
+              ESP_LOGI("Apollo", "Sleep duration set to %.0f minutes", minutes);
             } else {
-              ESP_LOGW("Apollo", "Invalid sleep duration: %.2f (must be 0.01-24 hours)", hours);
+              ESP_LOGW("Apollo", "Invalid sleep duration: %.2f (must be 1-1440 minutes)", minutes);
             }
+
+    - topic: apollo/temp-pro-1/battery/command/sleep_duration
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).current_option() == "battery";'
+            then:
+              - lambda: |-
+                  float minutes = atof(x.c_str());
+                  if (minutes >= 1 && minutes <= 1440) {
+                    id(deep_sleep_sleep_duration).publish_state(minutes);
+                    ESP_LOGI("Apollo", "battery-class sleep_duration: %.0f min", minutes);
+                  }
+
+    - topic: apollo/temp-pro-1/wired/command/sleep_duration
+      then:
+        - if:
+            condition:
+              lambda: 'return id(power_source).current_option() == "wired";'
+            then:
+              - lambda: |-
+                  float minutes = atof(x.c_str());
+                  if (minutes >= 1 && minutes <= 1440) {
+                    id(deep_sleep_sleep_duration).publish_state(minutes);
+                    ESP_LOGI("Apollo", "wired-class sleep_duration: %.0f min", minutes);
+                  }
 
     # Buzzer test - payload: RTTTL string or preset name (beep, siren, success, error)
     - topic: apollo/temp-pro-1/command/buzzer
@@ -333,6 +507,10 @@ mqtt:
             id: rtttl_buzzer
 
 script:
+  # Single-click status indicator for the boot button. Referenced from
+  # Core_MQTT.yaml's reset_button on_multi_click handler.
+  # WiFi variant uses three colors (vs the ETH variant's two) since WiFi
+  # connectivity can fail independently of MQTT.
   - id: statusCheck
     then:
       - if:
@@ -342,7 +520,7 @@ script:
             - logger.log: "Apollo Automation: Connected To MQTT"
             - light.turn_on:
                 id: rgb_light
-                brightness: 100%
+                brightness: 25%
                 red: 0%
                 green: 0%
                 blue: 100%
@@ -351,18 +529,18 @@ script:
                 condition:
                   - wifi.connected
                 then:
-                  - logger.log: "Apollo Automation: Connected To Wifi"
+                  - logger.log: "Apollo Automation: Connected To WiFi (no MQTT)"
                   - light.turn_on:
                       id: rgb_light
-                      brightness: 100%
+                      brightness: 25%
                       red: 0%
                       green: 100%
                       blue: 0%
                 else:
-                  - logger.log: "Apollo Automation: Not Connected To Wifi"
+                  - logger.log: "Apollo Automation: Not Connected To WiFi"
                   - light.turn_on:
                       id: rgb_light
-                      brightness: 100%
+                      brightness: 25%
                       red: 100%
                       green: 100%
                       blue: 0%
@@ -374,6 +552,33 @@ button:
     icon: mdi:power-cycle
     name: "ESP Reboot"
     id: esp_reboot
+
+  # Diagnostic: end the current wake immediately and enter deep sleep.
+  # Flips power_source to "battery" first so wired devices honor it too.
+  - platform: template
+    name: "Force Sleep"
+    id: button_force_sleep
+    icon: mdi:power-sleep
+    entity_category: "diagnostic"
+    on_press:
+      - lambda: |-
+          ESP_LOGW("Apollo", "Force Sleep triggered via web UI");
+          if (id(power_source).current_option() != "battery") {
+            auto call = id(power_source).make_call();
+            call.set_option("battery");
+            call.perform();
+          }
+      - script.execute: prepare_and_sleep
+
+  # Trigger an immediate publish_mqtt_data run from the web UI
+  - platform: template
+    name: "Publish Now"
+    id: button_publish_now
+    icon: mdi:publish
+    entity_category: "diagnostic"
+    on_press:
+      - lambda: 'ESP_LOGW("Apollo", "Publish Now triggered via web UI");'
+      - script.execute: publish_mqtt_data
 
 packages:
   core: !include Core_MQTT.yaml

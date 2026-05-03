@@ -897,11 +897,20 @@ script:
           const char* mac = id(device_mac_address).state.c_str();
           const char* name = App.get_name().c_str();
 
-          // Build unique device suffix from last 6 chars of MAC (e.g. "352b94")
-          uint8_t raw_mac[6];
-          esp_read_mac(raw_mac, ESP_MAC_BASE);
+          // Build unique device suffix from last 6 chars of MAC (e.g. "352b94").
+          // Using ESPHome's portable get_mac_address() (returns "9C139EEDE290"
+          // uppercase, no separators) — works on both ETH and WiFi variants.
+          // base MAC == STA MAC on this chip, so the suffix matches what other
+          // ESPHome MAC helpers produce.
+          std::string mac_str = esphome::get_mac_address();
           char mac_suffix[7];
-          snprintf(mac_suffix, sizeof(mac_suffix), "%02x%02x%02x", raw_mac[3], raw_mac[4], raw_mac[5]);
+          // Take last 6 chars, lowercase them so topics are consistent with
+          // the previous behavior.
+          for (int i = 0; i < 6; i++) {
+            char c = mac_str.length() >= 6 ? mac_str[mac_str.length() - 6 + i] : '0';
+            mac_suffix[i] = (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+          }
+          mac_suffix[6] = '\0';
 
           // Priority: Custom text > Dropdown > MAC suffix
           std::string custom = id(custom_column_id).state;
@@ -2243,12 +2252,9 @@ text_sensor:
     id: device_mac_address
     entity_category: "diagnostic"
     lambda: |-
-      uint8_t mac[6];
-      esp_read_mac(mac, ESP_MAC_BASE);
-      char buf[18];
-      snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-      return std::string(buf);
+      // Portable across ETH and WiFi variants — no need for esp_mac.h.
+      // Returns "AA:BB:CC:DD:EE:FF" format.
+      return esphome::get_mac_address_pretty();
 
 
   - platform: template
