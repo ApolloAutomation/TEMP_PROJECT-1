@@ -90,6 +90,14 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # One-time flag: set true after the on_boot safety reset has corrected a
+  # stale max_wake_time_s NVS value (< 45). Persists across reboots so the
+  # auto-correction only runs ONCE per device. After that, operators can
+  # tune max_wake_time_s below 45 again via the web server if they want.
+  - id: max_wake_time_reset_done
+    type: bool
+    restore_value: true
+    initial_value: 'false'
   # Why the device woke up — captured in on_boot via esp_sleep_get_wakeup_cause()
   # and published as meta/wake_reason. Values: timer, button, cold_boot, other.
   - id: wake_reason_str
@@ -544,6 +552,14 @@ number:
 
   # Max wake time before safety-net forces sleep (seconds from boot).
   # 45s default is comfortable for healthy networks. Bump higher for slow STP or flaky DNS.
+  # Max Wake Time — hard cap on per-wake duration before the safety-net
+  # interval forces sleep. min_value stays at 30 to keep it tunable for
+  # special cases (testing, very-fast networks). A one-time auto-reset in
+  # on_boot (in the variant YAMLs) heals any device that's stuck at < 45
+  # from older firmware, but only runs ONCE per device — operators can
+  # subsequently tune below 45 again via the web server if they have a
+  # good reason. Going below 45 risks the safety-net cutting MQTT off
+  # mid-publish on slow networks, so know what you're doing.
   - platform: template
     name: "Max Wake Time"
     id: max_wake_time_s
@@ -708,6 +724,30 @@ number:
     entity_category: CONFIG
     unit_of_measurement: "s"
 
+  # MQTT QoS for all sensor/meta/status publishes from publish_mqtt_data.
+  #   0 = fire and forget (lowest overhead, no delivery guarantee)
+  #   1 = at-least-once (broker PUBACK required, possible duplicates — fine since
+  #       retain=true means the broker overwrites cleanly). DEFAULT.
+  #   2 = exactly-once (4-way handshake, overkill for sensor snapshots)
+  # Why default 1: at QoS 0 the IDF MQTT client treats publishes as fire-and-
+  # forget and discards the TCP outbox at deep_sleep.enter. At QoS 1 the client
+  # tracks pending PUBACKs and the publish path is more resilient to the brief
+  # wake window. Pairs with the 3-sec post-publish delay in on_connect.
+  # The self-heal command-topic scrub stays at QoS 0 regardless.
+  - platform: template
+    name: "MQTT QoS"
+    id: qos_level
+    min_value: 0
+    max_value: 2
+    step: 1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 1
+    icon: "mdi:check-network"
+    entity_category: CONFIG
+
   # Deep sleep duration in MINUTES — configurable via web server text box.
   # restore_value: true persists web UI changes across reboots.
   # PRODUCTION default: 30 min (Toyota requirement).
@@ -842,7 +882,12 @@ interval:
             # Publish runs even when disconnected — queued publishes fail silently
             # but the boxed diagnostic summary log fires either way.
             - script.execute: publish_mqtt_data
-            - delay: 200ms
+            # Match on_connect's post-publish delay so the safety-net publish
+            # path gets the same outbox drain time. Originally 200ms which was
+            # enough for QoS 0 fire-and-forget, but with QoS 1 default + ~47
+            # publishes the IDF MQTT client needs real time to flush before
+            # deep_sleep.enter cuts the W5500 PHY power. 200ms = data lost.
+            - delay: 5s
             - script.execute: prepare_and_sleep
 
   # Periodic MQTT publish for wired devices (which never sleep).
@@ -950,10 +995,20 @@ script:
             device_suffix = mac_suffix;
           }
 
-          // Topic prefix: Apollo/temp-pro-1-{column_id or mac_suffix}
-          // Following UNS: {Vendor}/{Station}/sensor/{Tag}
-          char prefix[64];
-          snprintf(prefix, sizeof(prefix), "Apollo/temp-pro-1-%s", device_suffix);
+          // Topic prefix: <root>-<column_id or mac_suffix>
+          // Default root is "Apollo/temp-pro-1" (UNS convention: {Vendor}/{Station}).
+          // Operator can override via web server "MQTT Topic Prefix" to nest under
+          // a site path (e.g. "TMMK/Powertrain/Apollo/temp-pro-1") or change case.
+          // Empty override = use default. No reboot needed — picks up next wake.
+          std::string prefix_root = id(mqtt_topic_prefix_override).state;
+          if (prefix_root.empty()) {
+            prefix_root = "Apollo/temp-pro-1";
+          }
+          char prefix[128];
+          snprintf(prefix, sizeof(prefix), "%s-%s", prefix_root.c_str(), device_suffix);
+
+          // Configurable QoS for all publishes below. Clamped to [0, 2].
+          uint8_t qos = (uint8_t)std::min(2.0f, std::max(0.0f, id(qos_level).state));
 
           // Publish sensor values - topic is the key, payload is the value
           char topic[128];
@@ -983,12 +1038,12 @@ script:
             for (int i = 0; i < 4; i++) {
               snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[i]);
               snprintf(buf, sizeof(buf), "%.1f", pm_vals[i]);
-              id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+              id(mqtt_client).publish(topic, buf, strlen(buf), qos, true);
             }
 
             snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[4]);
             snprintf(buf, sizeof(buf), "%.1f", total);
-            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+            id(mqtt_client).publish(topic, buf, strlen(buf), qos, true);
           }
 
           // Battery — always publish. -1 sentinel when NaN so subscribers
@@ -996,7 +1051,7 @@ script:
           int batt = batt_valid ? (int)roundf(std::max(0.0f, id(batt_pct).state)) : -1;
           snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[5]);
           snprintf(buf, sizeof(buf), "%d", batt);
-          id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+          id(mqtt_client).publish(topic, buf, strlen(buf), qos, true);
 
           // SHT3x temperature (°F) and humidity (%) — always publish, like PM/battery.
           // NaN → -1 sentinel so subscribers can detect a sensor failure.
@@ -1005,39 +1060,39 @@ script:
 
           snprintf(topic, sizeof(topic), "%s/sensor/temperature", prefix);
           snprintf(buf, sizeof(buf), "%.1f", temp_f);
-          id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+          id(mqtt_client).publish(topic, buf, strlen(buf), qos, true);
 
           snprintf(topic, sizeof(topic), "%s/sensor/humidity", prefix);
           snprintf(buf, sizeof(buf), "%.1f", rh_pct);
-          id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+          id(mqtt_client).publish(topic, buf, strlen(buf), qos, true);
 
           // Publish metadata (retained)
           const char* ip = id(device_ip_address).state.c_str();
 
           snprintf(topic, sizeof(topic), "%s/meta/device_id", prefix);
-          id(mqtt_client).publish(topic, mac, strlen(mac), 0, true);
+          id(mqtt_client).publish(topic, mac, strlen(mac), qos, true);
 
           snprintf(topic, sizeof(topic), "%s/meta/device_name", prefix);
-          id(mqtt_client).publish(topic, name, strlen(name), 0, true);
+          id(mqtt_client).publish(topic, name, strlen(name), qos, true);
 
           snprintf(topic, sizeof(topic), "%s/meta/ip_address", prefix);
-          id(mqtt_client).publish(topic, ip, strlen(ip), 0, true);
+          id(mqtt_client).publish(topic, ip, strlen(ip), qos, true);
 
           const char* unit_pm = "ug/m3";
           snprintf(topic, sizeof(topic), "%s/meta/unit_pm", prefix);
-          id(mqtt_client).publish(topic, unit_pm, strlen(unit_pm), 0, true);
+          id(mqtt_client).publish(topic, unit_pm, strlen(unit_pm), qos, true);
 
           const char* unit_batt = "%";
           snprintf(topic, sizeof(topic), "%s/meta/unit_battery", prefix);
-          id(mqtt_client).publish(topic, unit_batt, strlen(unit_batt), 0, true);
+          id(mqtt_client).publish(topic, unit_batt, strlen(unit_batt), qos, true);
 
           const char* unit_temp = "F";
           snprintf(topic, sizeof(topic), "%s/meta/unit_temperature", prefix);
-          id(mqtt_client).publish(topic, unit_temp, strlen(unit_temp), 0, true);
+          id(mqtt_client).publish(topic, unit_temp, strlen(unit_temp), qos, true);
 
           const char* unit_rh = "%";
           snprintf(topic, sizeof(topic), "%s/meta/unit_humidity", prefix);
-          id(mqtt_client).publish(topic, unit_rh, strlen(unit_rh), 0, true);
+          id(mqtt_client).publish(topic, unit_rh, strlen(unit_rh), qos, true);
 
           // sleep_mode is derived from power_source for backward compatibility
           // with subscribers that watch this topic. battery → "ON" (will sleep),
@@ -1045,13 +1100,13 @@ script:
           // meta/power_source instead.
           const char* sleep_mode = (id(power_source).current_option() == "wired") ? "OFF" : "ON";
           snprintf(topic, sizeof(topic), "%s/meta/sleep_mode", prefix);
-          id(mqtt_client).publish(topic, sleep_mode, strlen(sleep_mode), 0, true);
+          id(mqtt_client).publish(topic, sleep_mode, strlen(sleep_mode), qos, true);
 
           // Power source — "battery" or "wired". The single source of truth
           // for sleep behavior; replaced the old separate prevent_sleep switch.
           std::string power_src = id(power_source).current_option();
           snprintf(topic, sizeof(topic), "%s/meta/power_source", prefix);
-          id(mqtt_client).publish(topic, power_src.c_str(), power_src.length(), 0, true);
+          id(mqtt_client).publish(topic, power_src.c_str(), power_src.length(), qos, true);
 
           // Sensors-skipped diagnostic — empty string when this wake's
           // publish was complete, or CSV of sensor blocks that were skipped
@@ -1059,14 +1114,14 @@ script:
           // this topic see exactly which sensor is failing on which device
           // without having to compare against last-known-good values.
           snprintf(topic, sizeof(topic), "%s/status/sensors_skipped", prefix);
-          id(mqtt_client).publish(topic, sensors_skipped, strlen(sensors_skipped), 0, true);
+          id(mqtt_client).publish(topic, sensors_skipped, strlen(sensors_skipped), qos, true);
 
           // Drain-protection status: "TRIGGERED" if the rate alarm fired this wake,
           // else "OK". Operators should investigate any device reporting TRIGGERED —
           // the device just escaped fast battery drain by flipping to battery mode.
           const char* drain_status = id(drain_protection_triggered) ? "TRIGGERED" : "OK";
           snprintf(topic, sizeof(topic), "%s/status/drain_protection", prefix);
-          id(mqtt_client).publish(topic, drain_status, strlen(drain_status), 0, true);
+          id(mqtt_client).publish(topic, drain_status, strlen(drain_status), qos, true);
 
           // Lifetime drain trigger count + boot stamp of the last trip. Lets
           // operators inventory devices with a history of trouble:
@@ -1074,38 +1129,38 @@ script:
           char drain_count_buf[24];
           snprintf(drain_count_buf, sizeof(drain_count_buf), "%u", (unsigned)id(drain_trigger_count));
           snprintf(topic, sizeof(topic), "%s/meta/drain_trigger_count", prefix);
-          id(mqtt_client).publish(topic, drain_count_buf, strlen(drain_count_buf), 0, true);
+          id(mqtt_client).publish(topic, drain_count_buf, strlen(drain_count_buf), qos, true);
 
           char drain_last_buf[24];
           snprintf(drain_last_buf, sizeof(drain_last_buf), "%u", (unsigned)id(drain_last_trigger_boot));
           snprintf(topic, sizeof(topic), "%s/meta/drain_last_trigger_boot", prefix);
-          id(mqtt_client).publish(topic, drain_last_buf, strlen(drain_last_buf), 0, true);
+          id(mqtt_client).publish(topic, drain_last_buf, strlen(drain_last_buf), qos, true);
 
           // Critical-battery status — TRIGGERED if pct < threshold this wake.
           const char* crit = id(critical_battery_active) ? "TRIGGERED" : "OK";
           snprintf(topic, sizeof(topic), "%s/status/critical_battery", prefix);
-          id(mqtt_client).publish(topic, crit, strlen(crit), 0, true);
+          id(mqtt_client).publish(topic, crit, strlen(crit), qos, true);
 
           // Wake reason — what caused this wake (timer/button/cold_boot/other).
           {
             std::string wr = id(wake_reason_str);
             snprintf(topic, sizeof(topic), "%s/meta/wake_reason", prefix);
-            id(mqtt_client).publish(topic, wr.c_str(), wr.length(), 0, true);
+            id(mqtt_client).publish(topic, wr.c_str(), wr.length(), qos, true);
           }
 
           // Per-sensor failure counters (consecutive). Cleared on success.
           char fail_buf[16];
           snprintf(fail_buf, sizeof(fail_buf), "%u", (unsigned)id(sen55_fail_count));
           snprintf(topic, sizeof(topic), "%s/meta/sen55_fail_count", prefix);
-          id(mqtt_client).publish(topic, fail_buf, strlen(fail_buf), 0, true);
+          id(mqtt_client).publish(topic, fail_buf, strlen(fail_buf), qos, true);
 
           snprintf(fail_buf, sizeof(fail_buf), "%u", (unsigned)id(sht_fail_count));
           snprintf(topic, sizeof(topic), "%s/meta/sht_fail_count", prefix);
-          id(mqtt_client).publish(topic, fail_buf, strlen(fail_buf), 0, true);
+          id(mqtt_client).publish(topic, fail_buf, strlen(fail_buf), qos, true);
 
           snprintf(fail_buf, sizeof(fail_buf), "%u", (unsigned)id(max17048_fail_count));
           snprintf(topic, sizeof(topic), "%s/meta/max17048_fail_count", prefix);
-          id(mqtt_client).publish(topic, fail_buf, strlen(fail_buf), 0, true);
+          id(mqtt_client).publish(topic, fail_buf, strlen(fail_buf), qos, true);
 
           // Lifetime battery min/max (publish only when initialized — sentinels
           // mean "never observed yet", in which case we skip the publish).
@@ -1113,25 +1168,25 @@ script:
             char buf[16];
             snprintf(buf, sizeof(buf), "%.1f", id(lifetime_min_battery_pct));
             snprintf(topic, sizeof(topic), "%s/meta/lifetime_min_battery_pct", prefix);
-            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+            id(mqtt_client).publish(topic, buf, strlen(buf), qos, true);
           }
           if (id(lifetime_max_battery_pct) >= 0.0f) {
             char buf[16];
             snprintf(buf, sizeof(buf), "%.1f", id(lifetime_max_battery_pct));
             snprintf(topic, sizeof(topic), "%s/meta/lifetime_max_battery_pct", prefix);
-            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+            id(mqtt_client).publish(topic, buf, strlen(buf), qos, true);
           }
           if (id(lifetime_min_battery_v) <= 10.0f) {
             char buf[16];
             snprintf(buf, sizeof(buf), "%.3f", id(lifetime_min_battery_v));
             snprintf(topic, sizeof(topic), "%s/meta/lifetime_min_battery_v", prefix);
-            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+            id(mqtt_client).publish(topic, buf, strlen(buf), qos, true);
           }
           if (id(lifetime_max_battery_v) >= 0.0f) {
             char buf[16];
             snprintf(buf, sizeof(buf), "%.3f", id(lifetime_max_battery_v));
             snprintf(topic, sizeof(topic), "%s/meta/lifetime_max_battery_v", prefix);
-            id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+            id(mqtt_client).publish(topic, buf, strlen(buf), qos, true);
           }
 
           // Health rollup — single OK/DEGRADED/CRITICAL field for dashboards.
@@ -1150,7 +1205,7 @@ script:
             health = "DEGRADED";
           }
           snprintf(topic, sizeof(topic), "%s/status/health", prefix);
-          id(mqtt_client).publish(topic, health, strlen(health), 0, true);
+          id(mqtt_client).publish(topic, health, strlen(health), qos, true);
 
           // ---- Configured values (meta/config_*) ----
           // Mirrored to MQTT so operators can audit fleet config without
@@ -1158,79 +1213,79 @@ script:
           char cfg_buf[24];
           snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(deep_sleep_sleep_duration).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_sleep_duration_min", prefix);
-          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), qos, true);
 
           snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(max_wake_time_s).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_max_wake_time_s", prefix);
-          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), qos, true);
 
           snprintf(cfg_buf, sizeof(cfg_buf), "%.1f", id(drain_threshold_pct_per_hour).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_drain_threshold_pct_per_h", prefix);
-          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), qos, true);
 
           snprintf(cfg_buf, sizeof(cfg_buf), "%.1f", id(drain_min_drop_pct).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_drain_min_drop_pct", prefix);
-          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), qos, true);
 
           snprintf(cfg_buf, sizeof(cfg_buf), "%.1f", id(wired_drop_threshold_pct).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_wired_drop_threshold_pct", prefix);
-          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), qos, true);
 
           snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(critical_battery_threshold_pct).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_critical_battery_threshold_pct", prefix);
-          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), qos, true);
 
           snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(critical_battery_sleep_min).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_critical_battery_sleep_min", prefix);
-          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), qos, true);
 
           snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(warmup_delay_s).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_warmup_delay_s", prefix);
-          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), qos, true);
 
           snprintf(cfg_buf, sizeof(cfg_buf), "%.0f", id(prevent_sleep_publish_interval_s).state);
           snprintf(topic, sizeof(topic), "%s/meta/config_publish_interval_s", prefix);
-          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), 0, true);
+          id(mqtt_client).publish(topic, cfg_buf, strlen(cfg_buf), qos, true);
 
           // --- Diagnostic metadata (firmware, counters, health) ---
           const char* fw_ver = "${version}";
           snprintf(topic, sizeof(topic), "%s/meta/firmware_version", prefix);
-          id(mqtt_client).publish(topic, fw_ver, strlen(fw_ver), 0, true);
+          id(mqtt_client).publish(topic, fw_ver, strlen(fw_ver), qos, true);
 
           char num_buf[24];
           snprintf(num_buf, sizeof(num_buf), "%u", (unsigned)id(boot_count));
           snprintf(topic, sizeof(topic), "%s/meta/boot_count", prefix);
-          id(mqtt_client).publish(topic, num_buf, strlen(num_buf), 0, true);
+          id(mqtt_client).publish(topic, num_buf, strlen(num_buf), qos, true);
 
           float wake_sec = millis() / 1000.0f;
           snprintf(num_buf, sizeof(num_buf), "%.1f", wake_sec);
           snprintf(topic, sizeof(topic), "%s/meta/wake_duration_s", prefix);
-          id(mqtt_client).publish(topic, num_buf, strlen(num_buf), 0, true);
+          id(mqtt_client).publish(topic, num_buf, strlen(num_buf), qos, true);
 
           float batt_v_val = id(batt_v).state;
           if (!std::isnan(batt_v_val)) {
             snprintf(num_buf, sizeof(num_buf), "%.3f", batt_v_val);
             snprintf(topic, sizeof(topic), "%s/meta/battery_voltage", prefix);
-            id(mqtt_client).publish(topic, num_buf, strlen(num_buf), 0, true);
+            id(mqtt_client).publish(topic, num_buf, strlen(num_buf), qos, true);
           }
 
           uint32_t free_heap_kb = esp_get_free_heap_size() / 1024;
           snprintf(num_buf, sizeof(num_buf), "%u", (unsigned)free_heap_kb);
           snprintf(topic, sizeof(topic), "%s/meta/free_heap_kb", prefix);
-          id(mqtt_client).publish(topic, num_buf, strlen(num_buf), 0, true);
+          id(mqtt_client).publish(topic, num_buf, strlen(num_buf), qos, true);
 
           const char* notes = id(deployment_notes).state.c_str();
           snprintf(topic, sizeof(topic), "%s/meta/deployment_notes", prefix);
-          id(mqtt_client).publish(topic, notes, strlen(notes), 0, true);
+          id(mqtt_client).publish(topic, notes, strlen(notes), qos, true);
 
           // --- SEN55 hardware identification (cached from boot-time I2C read) ---
           const char* sen55_ser = id(sen55_serial).c_str();
           snprintf(topic, sizeof(topic), "%s/meta/sen55_serial", prefix);
-          id(mqtt_client).publish(topic, sen55_ser, strlen(sen55_ser), 0, true);
+          id(mqtt_client).publish(topic, sen55_ser, strlen(sen55_ser), qos, true);
 
           const char* sen55_fwver = id(sen55_fw).c_str();
           snprintf(topic, sizeof(topic), "%s/meta/sen55_firmware", prefix);
-          id(mqtt_client).publish(topic, sen55_fwver, strlen(sen55_fwver), 0, true);
+          id(mqtt_client).publish(topic, sen55_fwver, strlen(sen55_fwver), qos, true);
 
           // --- SEN55 device status register (0xD206): 0 = healthy, non-zero = error flags ---
           uint16_t status_words[2];
@@ -1242,7 +1297,7 @@ script:
             char status_buf[16];
             snprintf(status_buf, sizeof(status_buf), "0x%08X", (unsigned int)sen55_status);
             snprintf(topic, sizeof(topic), "%s/status/sen55_errors", prefix);
-            id(mqtt_client).publish(topic, status_buf, strlen(status_buf), 0, true);
+            id(mqtt_client).publish(topic, status_buf, strlen(status_buf), qos, true);
             if (sen55_status != 0) {
               ESP_LOGW("Apollo", "SEN55 Status non-zero: %s (check fan/laser/gas/PM bits)", status_buf);
             }
@@ -1676,7 +1731,12 @@ script:
           ESP_LOGW("Apollo", "Preparing for deep sleep (awake for %.1f s)...", millis() / 1000.0f);
           // Stop SEN55 measurement before teardown
           id(sen55)->write_command((uint16_t)0x0104);
-      - delay: 50ms
+      # Final 1 sec window for ESPHome's MQTT on_shutdown callbacks to run.
+      # ESPHome should send MQTT DISCONNECT and flush remaining TCP frames
+      # before deep_sleep.enter — but it has to happen before the W5500 PHY
+      # gets powered down by the priority-300 on_shutdown handler. This extra
+      # delay ensures the component shutdown sequence has time to complete.
+      - delay: 1s
       - light.turn_off: rgb_light
       - rtttl.stop:
           id: rtttl_buzzer
@@ -2072,6 +2132,26 @@ text:
     name: "MQTT Broker"
     id: mqtt_broker_override
     icon: mdi:server-network
+    entity_category: "config"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 64
+    mode: text
+
+  # MQTT topic prefix override. Empty = default "Apollo/temp-pro-1" (current
+  # production tree). Set to e.g. "TMMK/Powertrain/Apollo/temp-pro-1" to nest
+  # the device tree under a site prefix, or "apollo/temp-pro-1" for lowercase.
+  # The device suffix (column_id or MAC) is appended with a "-" separator:
+  #   <prefix>-<suffix>/sensor/...   /meta/...   /status/...
+  # Takes effect immediately on next publish — no reboot needed.
+  # NOTE: changing this orphans any retained values at the old prefix. Operator
+  # should clear those from the broker manually if needed.
+  - platform: template
+    name: "MQTT Topic Prefix"
+    id: mqtt_topic_prefix_override
+    icon: mdi:tag-text
     entity_category: "config"
     optimistic: true
     restore_value: true

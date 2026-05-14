@@ -36,9 +36,8 @@ esphome:
             ESP_LOGW("Apollo", "Wake cause: %s — GPIO7 hold released", cause);
 
     # Priority 700 — runs before the MQTT client connects (priority ~250).
-    # Applies user-configurable broker/credential/web-auth overrides and
-    # programmatically configures per-device LWT and birth messages so
-    # subscribers can tell "device offline" from "device sleeping but alive."
+    # Applies user-configurable broker/credential/web-auth overrides so they
+    # take effect before the client uses the compile-time !secret defaults.
     - priority: 700
       then:
         - lambda: |-
@@ -75,31 +74,6 @@ esphome:
               }
             }
 
-            // ----- LWT and birth message (per-device) -----
-            // Set programmatically because the YAML birth_message/will_message
-            // can't reach the runtime device name (which has the MAC suffix).
-            // App.get_name() returns e.g. "apollo-temp-pro-1-mqtt-a1b2c3", giving
-            // each unit a unique online/offline topic the broker can manage on
-            // ungraceful disconnect.
-            {
-              std::string online_topic = std::string("apollo/temp-pro-1/") + App.get_name() + "/meta/online";
-              esphome::mqtt::MQTTMessage will;
-              will.topic = online_topic;
-              will.payload = "false";
-              will.qos = 1;
-              will.retain = true;
-              id(mqtt_client)->set_last_will(std::move(will));
-
-              esphome::mqtt::MQTTMessage birth;
-              birth.topic = online_topic;
-              birth.payload = "true";
-              birth.qos = 1;
-              birth.retain = true;
-              id(mqtt_client)->set_birth_message(std::move(birth));
-
-              ESP_LOGW("Apollo", "LWT/birth configured for: %s", online_topic.c_str());
-            }
-
     # Priority -100 — runs after components init but before the main loop.
     # Increments boot count, sets the sleep duration, captures the wake reason,
     # checks for boot loops, and applies the wired-mode latch.
@@ -111,6 +85,19 @@ esphome:
             ESP_LOGW("Apollo", "Boot count: %u", (unsigned)id(boot_count));
             // Sleep duration number is in MINUTES (matches Core_MQTT.yaml unit)
             id(deep_sleep_1).set_sleep_duration(id(deep_sleep_sleep_duration).state * 60 * 1000);
+            // ONE-TIME safety reset for max_wake_time_s — see ETH variant.
+            ESP_LOGW("Apollo", "max_wake_time check: flag=%s, current=%.0f s",
+                     id(max_wake_time_reset_done) ? "true" : "false",
+                     id(max_wake_time_s).state);
+            if (!id(max_wake_time_reset_done)) {
+              if (id(max_wake_time_s).state < 45.0f) {
+                ESP_LOGW("Apollo", "Max Wake Time was %.0f s — auto-correcting to 45 s (one-time)",
+                         id(max_wake_time_s).state);
+                id(max_wake_time_s).publish_state(45.0f);
+              }
+              id(max_wake_time_reset_done) = true;
+              ESP_LOGW("Apollo", "max_wake_time_reset_done flag set to true (one-time check complete)");
+            }
         # Capture WHY this wake happened (timer/button/cold_boot) — published
         # as meta/wake_reason and shown in the diagnostic summary log.
         - script.execute: capture_wake_reason
@@ -175,10 +162,6 @@ mqtt:
   topic_prefix: null
   discovery: false
 
-  # NOTE: birth_message and will_message are set programmatically in on_boot
-  # priority 700 (above) using App.get_name() so each unit gets a per-device
-  # online/offline topic with the MAC suffix included.
-
   # Default 15-min MQTT auto-reboot is dangerous for offline-capable devices —
   # broker outages would otherwise cause endless reboot loops. Disable.
   reboot_timeout: 0s
@@ -187,38 +170,39 @@ mqtt:
     then:
       - logger.log: "Connected to MQTT broker"
       # ---------------------------------------------------------------------
-      # Self-heal scrub: clear retained command messages at the broker on
-      # every successful connect. Defense against retained-on commands from
-      # an old firmware or a misconfigured Ignition tag binding that would
-      # otherwise drain the battery on every wake.
+      # SELF-HEAL SCRUB DISABLED (2026-05-14)
+      # See TEMP_PRO-1_MQTT_ETH.yaml for the full reasoning. tl;dr — the 20
+      # extra QoS-0 publishes per wake were eating the battery-mode wake
+      # budget and causing publish_mqtt_data data to be lost on deep_sleep.
+      # Drain protection is still provided by check_battery_drain.
       # ---------------------------------------------------------------------
-      - lambda: |-
-          auto clear = [](const char* topic) {
-            id(mqtt_client).publish(topic, "", 0, 0, true);
-          };
-          // Broadcast command topics
-          clear("apollo/temp-pro-1/command/prevent_sleep");
-          clear("apollo/temp-pro-1/command/sleep_duration");
-          clear("apollo/temp-pro-1/command/restart");
-          clear("apollo/temp-pro-1/command/light/on");
-          clear("apollo/temp-pro-1/command/light/off");
-          clear("apollo/temp-pro-1/command/light/red");
-          clear("apollo/temp-pro-1/command/light/green");
-          clear("apollo/temp-pro-1/command/light/blue");
-          clear("apollo/temp-pro-1/command/light/rgb");
-          clear("apollo/temp-pro-1/command/light/effect");
-          clear("apollo/temp-pro-1/command/buzzer");
-          clear("apollo/temp-pro-1/command/buzzer/stop");
-          // Class-scoped command topics
-          clear("apollo/temp-pro-1/battery/command/prevent_sleep");
-          clear("apollo/temp-pro-1/battery/command/sleep_duration");
-          clear("apollo/temp-pro-1/battery/command/power_source");
-          clear("apollo/temp-pro-1/wired/command/prevent_sleep");
-          clear("apollo/temp-pro-1/wired/command/sleep_duration");
-          clear("apollo/temp-pro-1/wired/command/power_source");
-          // New canonical power_source command
-          clear("apollo/temp-pro-1/command/power_source");
-          ESP_LOGI("Apollo", "Cleared retained command topics at broker");
+      # - lambda: |-
+      #     auto clear = [](const char* topic) {
+      #       id(mqtt_client).publish(topic, "", 0, 0, true);
+      #     };
+      #     // Broadcast command topics
+      #     clear("apollo/temp-pro-1/command/prevent_sleep");
+      #     clear("apollo/temp-pro-1/command/sleep_duration");
+      #     clear("apollo/temp-pro-1/command/restart");
+      #     clear("apollo/temp-pro-1/command/light/on");
+      #     clear("apollo/temp-pro-1/command/light/off");
+      #     clear("apollo/temp-pro-1/command/light/red");
+      #     clear("apollo/temp-pro-1/command/light/green");
+      #     clear("apollo/temp-pro-1/command/light/blue");
+      #     clear("apollo/temp-pro-1/command/light/rgb");
+      #     clear("apollo/temp-pro-1/command/light/effect");
+      #     clear("apollo/temp-pro-1/command/buzzer");
+      #     clear("apollo/temp-pro-1/command/buzzer/stop");
+      #     // Class-scoped command topics
+      #     clear("apollo/temp-pro-1/battery/command/prevent_sleep");
+      #     clear("apollo/temp-pro-1/battery/command/sleep_duration");
+      #     clear("apollo/temp-pro-1/battery/command/power_source");
+      #     clear("apollo/temp-pro-1/wired/command/prevent_sleep");
+      #     clear("apollo/temp-pro-1/wired/command/sleep_duration");
+      #     clear("apollo/temp-pro-1/wired/command/power_source");
+      #     // New canonical power_source command
+      #     clear("apollo/temp-pro-1/command/power_source");
+      #     ESP_LOGI("Apollo", "Cleared retained command topics at broker");
       # Boot-loop cooldown: if check_boot_loop set this flag in on_boot, skip
       # everything and go straight to sleep so whatever caused the loop has a
       # chance to clear before another attempt.
@@ -265,8 +249,11 @@ mqtt:
       - script.execute: check_battery_drain
       # Publish all MQTT data once
       - script.execute: publish_mqtt_data
-      # Wait for MQTT messages to be sent
-      - delay: 1s
+      # Self-heal scrub disabled — see TEMP_PRO-1_MQTT_ETH.yaml for reasoning.
+      # Drain detector in check_battery_drain provides the safety property.
+      # Wait for the esp-idf MQTT outbox to drain before sleeping.
+      # 10s was the empirically-confirmed working value.
+      - delay: 10s
       # Battery devices sleep here. Wired devices skip — they stay awake and
       # rely on the periodic publish-while-wired interval for ongoing data.
       - if:
