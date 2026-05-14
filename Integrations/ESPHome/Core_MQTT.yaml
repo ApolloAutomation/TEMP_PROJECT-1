@@ -703,7 +703,11 @@ number:
     unit_of_measurement: "s"
 
   # Warm-up delay before sampling SEN55 (seconds from boot).
-  # 20s default clears the fan spin-up transient. Tune per-site if needed.
+  # 20s is the SEN55 datasheet minimum for valid PM readings — was the
+  # pre-May-2 default and ran for months at TMMK with usable data.
+  # Saves ~10s per battery wake cycle vs the 30s conservative bump.
+  # Note: existing devices with NVS-saved 30 will keep 30 until set via
+  # web server (or until the operator wants to manually drop them).
   - platform: template
     name: "Warm-up Delay"
     id: warmup_delay_s
@@ -714,12 +718,7 @@ number:
     update_interval: never
     optimistic: true
     restore_value: true
-    # 30s gives SEN55 enough runtime to return valid PM readings before
-    # publish_mqtt_data fires. With per-sensor publish in place, a missed
-    # PM read no longer blocks battery/SHT/meta from publishing — but we
-    # still want the PM block to land on as many wakes as possible. Cost
-    # is ~10s extra wake current per cycle (~0.5%/day on a 5000 mAh cell).
-    initial_value: 30
+    initial_value: 20
     icon: "mdi:timer-sand"
     entity_category: CONFIG
     unit_of_measurement: "s"
