@@ -698,7 +698,12 @@ number:
     update_interval: never
     optimistic: true
     restore_value: true
-    initial_value: 20
+    # 30s gives SEN55 enough runtime to return valid PM readings before
+    # publish_mqtt_data fires. With per-sensor publish in place, a missed
+    # PM read no longer blocks battery/SHT/meta from publishing — but we
+    # still want the PM block to land on as many wakes as possible. Cost
+    # is ~10s extra wake current per cycle (~0.5%/day on a 5000 mAh cell).
+    initial_value: 30
     icon: "mdi:timer-sand"
     entity_category: CONFIG
     unit_of_measurement: "s"
@@ -885,13 +890,34 @@ script:
   - id: publish_mqtt_data
     then:
       - lambda: |-
-          // Check if mass concentration sensors are ready
-          if (std::isnan(id(pm_1_0).state) ||
-              std::isnan(id(pm_2_5).state) ||
-              std::isnan(id(pm_4_0).state) ||
-              std::isnan(id(pm_10_0).state)) {
-            ESP_LOGW("Apollo", "PM sensors not ready (NaN), skipping publish");
-            return;
+          // Per-sensor validity check. We NEVER bail entirely — operator
+          // visibility on battery/meta/partial-sensor data is always better
+          // than total silence. If a sensor block is invalid (NaN), we skip
+          // publishing those specific topics and advertise the skip list via
+          // /status/sensors_skipped so subscribers/operators can detect it.
+          //
+          // SHT3x and MAX17048 already publish -1 sentinels for NaN below
+          // (so subscribers see fresh data with an obvious failure signal).
+          // PM is all-or-nothing within its block (4 ranges + total need to
+          // be coherent), so for PM we skip the whole block when any is NaN
+          // rather than publish meaningless partial ranges.
+          bool pm_valid = !std::isnan(id(pm_1_0).state) &&
+                          !std::isnan(id(pm_2_5).state) &&
+                          !std::isnan(id(pm_4_0).state) &&
+                          !std::isnan(id(pm_10_0).state);
+          bool sht_valid = !std::isnan(id(sht_temperature).state) &&
+                           !std::isnan(id(sht_humidity).state);
+          bool batt_valid = !std::isnan(id(batt_pct).state);
+
+          // Build CSV skip list for the status topic + log line.
+          char sensors_skipped[32] = "";
+          if (!pm_valid)   strncat(sensors_skipped, "pm,",   sizeof(sensors_skipped) - strlen(sensors_skipped) - 1);
+          if (!sht_valid)  strncat(sensors_skipped, "sht,",  sizeof(sensors_skipped) - strlen(sensors_skipped) - 1);
+          if (!batt_valid) strncat(sensors_skipped, "batt,", sizeof(sensors_skipped) - strlen(sensors_skipped) - 1);
+          size_t slen = strlen(sensors_skipped);
+          if (slen > 0 && sensors_skipped[slen - 1] == ',') sensors_skipped[slen - 1] = '\0';
+          if (sensors_skipped[0] != '\0') {
+            ESP_LOGW("Apollo", "Partial publish — skipped/sentineled: %s", sensors_skipped);
           }
 
           const char* mac = id(device_mac_address).state.c_str();
@@ -929,15 +955,6 @@ script:
           char prefix[64];
           snprintf(prefix, sizeof(prefix), "Apollo/temp-pro-1-%s", device_suffix);
 
-          // Mass concentration ranges in ug/m3
-          float pm_vals[4] = {
-            std::max(0.0f, id(pm_1_0).state),
-            std::max(0.0f, id(pm_2_5).state - id(pm_1_0).state),
-            std::max(0.0f, id(pm_4_0).state - id(pm_2_5).state),
-            std::max(0.0f, id(pm_10_0).state - id(pm_4_0).state)
-          };
-          float total = std::max(0.0f, id(pm_10_0).state);
-
           // Publish sensor values - topic is the key, payload is the value
           char topic[128];
           char buf[32];
@@ -946,17 +963,37 @@ script:
             "pm_4_to_10", "pm_total", "battery_level"
           };
 
-          for (int i = 0; i < 4; i++) {
-            snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[i]);
-            snprintf(buf, sizeof(buf), "%.1f", pm_vals[i]);
+          // Mass concentration ranges in ug/m3. Computed unconditionally
+          // (std::max with 0 turns NaN into 0 on most implementations, and
+          // we only publish/log them when pm_valid below) so the diagnostic
+          // summary log later in this lambda can reference them safely.
+          float pm_vals[4] = {
+            std::max(0.0f, id(pm_1_0).state),
+            std::max(0.0f, id(pm_2_5).state - id(pm_1_0).state),
+            std::max(0.0f, id(pm_4_0).state - id(pm_2_5).state),
+            std::max(0.0f, id(pm_10_0).state - id(pm_4_0).state)
+          };
+          float total = std::max(0.0f, id(pm_10_0).state);
+
+          // PM block — only publish when all 4 ranges are valid. Skipping
+          // here leaves the broker's last retained PM values in place; the
+          // /status/sensors_skipped topic advertises the skip so operators
+          // know the displayed PM is stale.
+          if (pm_valid) {
+            for (int i = 0; i < 4; i++) {
+              snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[i]);
+              snprintf(buf, sizeof(buf), "%.1f", pm_vals[i]);
+              id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
+            }
+
+            snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[4]);
+            snprintf(buf, sizeof(buf), "%.1f", total);
             id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
           }
 
-          snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[4]);
-          snprintf(buf, sizeof(buf), "%.1f", total);
-          id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
-
-          int batt = std::isnan(id(batt_pct).state) ? -1 : (int)roundf(std::max(0.0f, id(batt_pct).state));
+          // Battery — always publish. -1 sentinel when NaN so subscribers
+          // see a fresh failure signal rather than stale retained value.
+          int batt = batt_valid ? (int)roundf(std::max(0.0f, id(batt_pct).state)) : -1;
           snprintf(topic, sizeof(topic), "%s/sensor/%s", prefix, tags[5]);
           snprintf(buf, sizeof(buf), "%d", batt);
           id(mqtt_client).publish(topic, buf, strlen(buf), 0, true);
@@ -1015,6 +1052,14 @@ script:
           std::string power_src = id(power_source).current_option();
           snprintf(topic, sizeof(topic), "%s/meta/power_source", prefix);
           id(mqtt_client).publish(topic, power_src.c_str(), power_src.length(), 0, true);
+
+          // Sensors-skipped diagnostic — empty string when this wake's
+          // publish was complete, or CSV of sensor blocks that were skipped
+          // (pm) or sent as -1 sentinels (sht, batt). Operators watching
+          // this topic see exactly which sensor is failing on which device
+          // without having to compare against last-known-good values.
+          snprintf(topic, sizeof(topic), "%s/status/sensors_skipped", prefix);
+          id(mqtt_client).publish(topic, sensors_skipped, strlen(sensors_skipped), 0, true);
 
           // Drain-protection status: "TRIGGERED" if the rate alarm fired this wake,
           // else "OK". Operators should investigate any device reporting TRIGGERED —
@@ -1423,12 +1468,16 @@ script:
           bool trip_rate = (total_minutes >= 5.0f &&
                             drop >= min_drop && rate >= rate_thr);
 
-          // Trigger 2: wired-cumulative — wired devices should never drain;
-          // any drop above wired_drop_threshold_pct (default 5%) means lost
-          // wired power, regardless of rate or window. This catches very
-          // slow drains AND drains that span reboots (baseline is now
-          // preserved across reboots, so the drop accumulates).
+          // Trigger 2: wired-cumulative — slow-drain catch-all for wired
+          // devices that aren't moving fast enough to trip the rate trigger.
+          // Requires BOTH a sustained 30-min window AND the magnitude floor
+          // (default 5%). The time floor prevents MAX17048 charge-cycle
+          // jitter (occasional 5% swings within minutes that recover) from
+          // false-tripping. A real wired-power loss continues dropping past
+          // 30 min, so it's still caught — just slightly later than before.
+          // (Fast real drains are still caught within 5 min by trip_rate.)
           bool trip_wired_drop = (is_wired &&
+                                  total_minutes >= 30.0f &&
                                   id(wired_drop_threshold_pct).state > 0.0f &&
                                   drop >= id(wired_drop_threshold_pct).state);
 
