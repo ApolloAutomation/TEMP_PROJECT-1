@@ -1,5 +1,5 @@
 substitutions:
-  version: "26.1.21.1"
+  version: "26.5.20.1"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
 esphome:
@@ -37,7 +37,7 @@ esp32:
 external_components:
   - source:
       type: local
-      path: custom_components
+      path: local_components
   - source: github://ApolloAutomation/esphome-battery-component
     components: [max17048]
 
@@ -159,6 +159,18 @@ one_wire:
   - platform: gpio
     pin: GPIO6
 
+uart:
+  - id: uart_ld2412
+    tx_pin: GPIO39
+    rx_pin: GPIO40
+    baud_rate: 115200
+    parity: NONE
+    stop_bits: 1
+
+ld2412:
+  id: ld2412_radar
+  uart_id: uart_ld2412
+
 # Buzzer
 output:
   - platform: ledc
@@ -173,10 +185,12 @@ binary_sensor:
   - platform: status
     name: Online
     id: ink_ha_connected
+    disabled_by_default: true
   - platform: gpio
-    pin: 
+    pin:
       number: GPIO0
       inverted: true
+      ignore_strapping_warning: true
       mode:
         input: true
         pullup: true
@@ -197,29 +211,51 @@ binary_sensor:
               id(statusCheck).execute();
             }
 
+  - platform: ld2412
+    dynamic_background_correction_status:
+      name: "LD2412 Dynamic Background Correction Status"
+      id: ld2412_dynamic_background_correction_status
+      disabled_by_default: true
+    has_target:
+      name: "LD2412 Presence"
+      id: ld2412_presence
+    has_moving_target:
+      name: "LD2412 Moving Target"
+      id: ld2412_moving_target
+      disabled_by_default: true
+    has_still_target:
+      name: "LD2412 Still Target"
+      id: ld2412_still_target
+      disabled_by_default: true
+
   - platform: template
     name: Alarm Temperature Within Range
     id: temp_within_range
+    disabled_by_default: true
     lambda: 'return std::isnan(id(sht_temperature).state) || ((id(sht_temperature).state <= id(max_temp).state) && (id(sht_temperature).state >= id(min_temp).state));'
 
   - platform: template
     name: Alarm Humidity Within Range
     id: humidity_within_range
+    disabled_by_default: true
     lambda: 'return std::isnan(id(sht_humidity).state) || ((id(sht_humidity).state <= id(max_humidity).state) && (id(sht_humidity).state >= id(min_humidity).state));'
 
   - platform: template
     name: Alarm Total PM Within Range
     id: total_pm_within_range
+    disabled_by_default: true
     lambda: 'return std::isnan(id(pm_10_0).state) || (id(pm_10_0).state < id(max_total_pm).state);'
 
   - platform: template
     name: Alarm Total PM Count Within Range
     id: total_pm_count_within_range
+    disabled_by_default: true
     lambda: 'return std::isnan(id(total_pm_count).state) || (id(total_pm_count).state < id(max_total_pm_count).state);'
 
   - platform: template
     name: Alarm Active
     id: alarm_active
+    disabled_by_default: true
     lambda: 'return (id(alarm_outside_temp_range).state && !id(temp_within_range).state) || (id(alarm_outside_humidity_range).state && !id(humidity_within_range).state) || (id(alarm_outside_total_pm_range).state && !id(total_pm_within_range).state) || (id(alarm_outside_total_pm_count_range).state && !id(total_pm_count_within_range).state);'
     on_release:
       then:
@@ -241,6 +277,7 @@ binary_sensor:
     name: "OTA Mode"
     id: ota_mode
     entity_id: input_boolean.apollo_ota_mode
+    disabled_by_default: true
     on_press:
       then:
         - lambda: |-
@@ -264,6 +301,7 @@ sensor:
     name: Uptime
     id: sys_uptime
     update_interval: 60s
+    disabled_by_default: true
 
   - platform: sht3xd
     id: sht3xd_sensor
@@ -326,7 +364,6 @@ sensor:
     pm_10_0:
       name: "PM <10µm Weight concentration"
       id: pm_10_0
-      disabled_by_default: true
       accuracy_decimals: 1
     nox:
       name: "NOX Index"
@@ -492,6 +529,7 @@ sensor:
   - platform: template
     name: "PM Total Count"
     id: total_pm_count
+    disabled_by_default: true
     lambda: |-
       return id(pm0_3_to_0_5_number).state +
              id(pm0_5_to_1_number).state +
@@ -510,15 +548,235 @@ sensor:
     id: dallas_temp_probe
     update_interval: 60s
 
+  - platform: ld2412
+    light:
+      name: LD2412 Light
+      id: ld2412_light
+      disabled_by_default: true
+    moving_distance:
+      name: LD2412 Moving Distance
+      id: ld2412_moving_distance
+      disabled_by_default: true
+      filters:
+          - throttle: 500ms
+    still_distance:
+      name: LD2412 Still Distance
+      id: ld2412_still_distance
+      disabled_by_default: true
+      filters:
+        - throttle: 500ms
+    moving_energy:
+      name: LD2412 Move Energy
+      id: ld2412_move_energy
+      disabled_by_default: true
+      filters:
+        - throttle: 500ms
+    still_energy:
+      name: LD2412 Still Energy
+      id: ld2412_still_energy
+      disabled_by_default: true
+      filters:
+        - throttle: 500ms
+    detection_distance:
+      name: LD2412 Detection Distance
+      id: ld2412_detection_distance
+      disabled_by_default: true
+      filters:
+        - throttle: 500ms
+    gate_0:
+      move_energy:
+        name: LD2412 g00 move energy
+        id: ld2412_g00_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g00 still energy
+        id: ld2412_g00_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_1:
+      move_energy:
+        name: LD2412 g01 move energy
+        id: ld2412_g01_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g01 still energy
+        id: ld2412_g01_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_2:
+      move_energy:
+        name: LD2412 g02 move energy
+        id: ld2412_g02_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g02 still energy
+        id: ld2412_g02_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_3:
+      move_energy:
+        name: LD2412 g03 move energy
+        id: ld2412_g03_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g03 still energy
+        id: ld2412_g03_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_4:
+      move_energy:
+        name: LD2412 g04 move energy
+        id: ld2412_g04_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g04 still energy
+        id: ld2412_g04_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_5:
+      move_energy:
+        name: LD2412 g05 move energy
+        id: ld2412_g05_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g05 still energy
+        id: ld2412_g05_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_6:
+      move_energy:
+        name: LD2412 g06 move energy
+        id: ld2412_g06_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g06 still energy
+        id: ld2412_g06_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_7:
+      move_energy:
+        name: LD2412 g07 move energy
+        id: ld2412_g07_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g07 still energy
+        id: ld2412_g07_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_8:
+      move_energy:
+        name: LD2412 g08 move energy
+        id: ld2412_g08_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g08 still energy
+        id: ld2412_g08_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_9:
+      move_energy:
+        name: LD2412 g09 move energy
+        id: ld2412_g09_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g09 still energy
+        id: ld2412_g09_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_10:
+      move_energy:
+        name: LD2412 g10 move energy
+        id: ld2412_g10_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g10 still energy
+        id: ld2412_g10_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_11:
+      move_energy:
+        name: LD2412 g11 move energy
+        id: ld2412_g11_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g11 still energy
+        id: ld2412_g11_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_12:
+      move_energy:
+        name: LD2412 g12 move energy
+        id: ld2412_g12_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g12 still energy
+        id: ld2412_g12_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+    gate_13:
+      move_energy:
+        name: LD2412 g13 move energy
+        id: ld2412_g13_move_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+      still_energy:
+        name: LD2412 g13 still energy
+        id: ld2412_g13_still_energy
+        disabled_by_default: true
+        filters:
+          - throttle: 500ms
+
   # Battery monitoring
   - platform: max17048
     id: max_17048
     battery_voltage:
       name: Battery voltage
       id: batt_v
+      disabled_by_default: true
     battery_level:
       name: Battery level
       id: batt_pct
+      disabled_by_default: true
       filters:
         - lambda: |
             if (x > 100) return 100;
@@ -566,6 +824,24 @@ button:
     name: "Factory Reset ESP"
     id: factory_reset_all
 
+  - platform: ld2412
+    factory_reset:
+      name: "LD2412 Factory Reset"
+      id: ld2412_factory_reset_btn
+      disabled_by_default: true
+    query_params:
+      name: "LD2412 Query params"
+      id: ld2412_query_params_btn
+      disabled_by_default: true
+    restart:
+      name: "LD2412 Restart"
+      id: ld2412_restart_btn
+      disabled_by_default: true
+    start_dynamic_background_correction:
+      name: "LD2412 Start Dynamic Background Correction"
+      id: ld2412_start_dynamic_background_correction_btn
+      disabled_by_default: true
+
 number:
   - platform: template
     id: min_temp
@@ -579,6 +855,7 @@ number:
     update_interval: never
     mode: box
     entity_category: config
+    disabled_by_default: true
 
   - platform: template
     id: max_temp
@@ -592,6 +869,7 @@ number:
     update_interval: never
     mode: box
     entity_category: config
+    disabled_by_default: true
 
   - platform: template
     id: min_humidity
@@ -605,6 +883,7 @@ number:
     update_interval: never
     mode: box
     entity_category: config
+    disabled_by_default: true
 
   - platform: template
     id: max_humidity
@@ -618,6 +897,7 @@ number:
     update_interval: never
     mode: box
     entity_category: config
+    disabled_by_default: true
 
   # Configurable temperature and humidity intervals (in minutes)
   - platform: template
@@ -632,6 +912,7 @@ number:
     restore_value: true
     mode: box
     entity_category: config
+    disabled_by_default: true
     on_value:
       then:
         - lambda: |-
@@ -651,6 +932,7 @@ number:
     restore_value: true
     mode: box
     entity_category: config
+    disabled_by_default: true
     on_value:
       then:
         - lambda: |-
@@ -672,6 +954,7 @@ number:
     update_interval: never
     mode: box
     entity_category: config
+    disabled_by_default: true
 
   - platform: template
     id: max_total_pm_count
@@ -686,6 +969,7 @@ number:
     update_interval: never
     mode: box
     entity_category: config
+    disabled_by_default: true
 
   # Deep sleep duration configuration
   - platform: template
@@ -702,10 +986,155 @@ number:
     icon: "mdi:arrow-collapse-right"
     entity_category: CONFIG
     unit_of_measurement: "h"
+    disabled_by_default: true
     on_value:
       then:
         - lambda: |-
             id(deep_sleep_1).set_sleep_duration(x * 60 * 60 * 1000);
+
+  - platform: ld2412
+    light_threshold:
+      name: "LD2412 Light Threshold"
+      id: ld2412_light_threshold
+      disabled_by_default: true
+    timeout:
+      name: "LD2412 Timeout"
+      id: ld2412_timeout
+      disabled_by_default: true
+    min_distance_gate:
+      name: "LD2412 min distance gate"
+      id: ld2412_min_distance_gate
+      disabled_by_default: true
+    max_distance_gate:
+      name: "LD2412 max distance gate"
+      id: ld2412_max_distance_gate
+      disabled_by_default: true
+    gate_0:
+      move_threshold:
+        name: LD2412 g00 move threshold
+        id: ld2412_g00_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g00 still threshold
+        id: ld2412_g00_still_threshold
+        disabled_by_default: true
+    gate_1:
+      move_threshold:
+        name: LD2412 g01 move threshold
+        id: ld2412_g01_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g01 still threshold
+        id: ld2412_g01_still_threshold
+        disabled_by_default: true
+    gate_2:
+      move_threshold:
+        name: LD2412 g02 move threshold
+        id: ld2412_g02_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g02 still threshold
+        id: ld2412_g02_still_threshold
+        disabled_by_default: true
+    gate_3:
+      move_threshold:
+        name: LD2412 g03 move threshold
+        id: ld2412_g03_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g03 still threshold
+        id: ld2412_g03_still_threshold
+        disabled_by_default: true
+    gate_4:
+      move_threshold:
+        name: LD2412 g04 move threshold
+        id: ld2412_g04_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g04 still threshold
+        id: ld2412_g04_still_threshold
+        disabled_by_default: true
+    gate_5:
+      move_threshold:
+        name: LD2412 g05 move threshold
+        id: ld2412_g05_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g05 still threshold
+        id: ld2412_g05_still_threshold
+        disabled_by_default: true
+    gate_6:
+      move_threshold:
+        name: LD2412 g06 move threshold
+        id: ld2412_g06_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g06 still threshold
+        id: ld2412_g06_still_threshold
+        disabled_by_default: true
+    gate_7:
+      move_threshold:
+        name: LD2412 g07 move threshold
+        id: ld2412_g07_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g07 still threshold
+        id: ld2412_g07_still_threshold
+        disabled_by_default: true
+    gate_8:
+      move_threshold:
+        name: LD2412 g08 move threshold
+        id: ld2412_g08_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g08 still threshold
+        id: ld2412_g08_still_threshold
+        disabled_by_default: true
+    gate_9:
+      move_threshold:
+        name: LD2412 g09 move threshold
+        id: ld2412_g09_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g09 still threshold
+        id: ld2412_g09_still_threshold
+        disabled_by_default: true
+    gate_10:
+      move_threshold:
+        name: LD2412 g10 move threshold
+        id: ld2412_g10_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g10 still threshold
+        id: ld2412_g10_still_threshold
+        disabled_by_default: true
+    gate_11:
+      move_threshold:
+        name: LD2412 g11 move threshold
+        id: ld2412_g11_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g11 still threshold
+        id: ld2412_g11_still_threshold
+        disabled_by_default: true
+    gate_12:
+      move_threshold:
+        name: LD2412 g12 move threshold
+        id: ld2412_g12_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g12 still threshold
+        id: ld2412_g12_still_threshold
+        disabled_by_default: true
+    gate_13:
+      move_threshold:
+        name: LD2412 g13 move threshold
+        id: ld2412_g13_move_threshold
+        disabled_by_default: true
+      still_threshold:
+        name: LD2412 g13 still threshold
+        id: ld2412_g13_still_threshold
+        disabled_by_default: true
 
 switch:
   - platform: factory_reset
@@ -725,24 +1154,38 @@ switch:
     id: alarm_outside_temp_range
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
+    disabled_by_default: true
 
   - platform: template
     name: "Alarm Outside Humidity Range"
     id: alarm_outside_humidity_range
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
+    disabled_by_default: true
 
   - platform: template
     name: "Alarm Outside Total PM Range"
     id: alarm_outside_total_pm_range
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
+    disabled_by_default: true
 
   - platform: template
     name: "Alarm Outside Total PM Count Range"
     id: alarm_outside_total_pm_count_range
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
+    disabled_by_default: true
+
+  - platform: ld2412
+    bluetooth:
+      name: "LD2412 Bluetooth"
+      id: ld2412_bluetooth
+      disabled_by_default: true
+    engineering_mode:
+      name: "LD2412 Engineering Mode"
+      id: ld2412_engineering_mode
+      disabled_by_default: true
 
   - platform: template
     name: "Prevent Sleep"
@@ -830,7 +1273,45 @@ script:
             ESP_LOGW("Apollo", "Total PM Count is NaN, skipping publish");
           }
 
+select:
+  - platform: ld2412
+    out_pin_level:
+      name: 'LD2412 Hardware output pin level'
+      id: ld2412_out_pin_level
+      disabled_by_default: true
+    light_function:
+      name: 'LD2412 Light Function'
+      id: ld2412_light_function
+      disabled_by_default: true
+    distance_resolution:
+      name: 'LD2412 Distance resolution'
+      id: ld2412_distance_resolution
+      disabled_by_default: true
+    baud_rate:
+      name: "LD2412 baud rate"
+      id: ld2412_baud_rate
+      disabled_by_default: true
+      on_value:
+        - delay: 3s
+        - lambda: |-
+            id(uart_ld2412).flush();
+            uint32_t new_baud_rate = stoi(x);
+            ESP_LOGD("change_baud_rate", "Changing baud rate from %i to %i", id(uart_ld2412).get_baud_rate(), new_baud_rate);
+            if (id(uart_ld2412).get_baud_rate() != new_baud_rate) {
+              id(uart_ld2412).set_baud_rate(new_baud_rate);
+              id(uart_ld2412).load_settings();
+            }
+
 text_sensor:
+  - platform: ld2412
+    version:
+      name: "LD2412 Firmware"
+      id: ld2412_firmware
+      disabled_by_default: true
+    mac_address:
+      name: "LD2412 BT MAC"
+      id: ld2412_bt_mac
+      disabled_by_default: true
   - platform: template
     name: "OTA URL"
     id: ota_url
