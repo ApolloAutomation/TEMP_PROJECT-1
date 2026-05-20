@@ -1,5 +1,5 @@
 substitutions:
-  version: "26.1.21.1"
+  version: "26.5.20.1"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
 esphome:
