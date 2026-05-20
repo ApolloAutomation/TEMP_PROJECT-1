@@ -222,9 +222,11 @@ binary_sensor:
     has_moving_target:
       name: "LD2412 Moving Target"
       id: ld2412_moving_target
+      disabled_by_default: true
     has_still_target:
       name: "LD2412 Still Target"
       id: ld2412_still_target
+      disabled_by_default: true
 
   - platform: template
     name: Alarm Temperature Within Range
