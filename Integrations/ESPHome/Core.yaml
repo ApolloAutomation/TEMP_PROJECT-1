@@ -323,7 +323,6 @@ sensor:
     state_class: measurement
     accuracy_decimals: 1
     update_interval: never
-    disabled_by_default: true
 
   - platform: template
     name: "Relative Humidity"
@@ -334,7 +333,6 @@ sensor:
     state_class: measurement
     accuracy_decimals: 1
     update_interval: never
-    disabled_by_default: true
 
   - platform: sen5x
     id: sen55
