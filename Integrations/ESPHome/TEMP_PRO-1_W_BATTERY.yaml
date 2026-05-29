@@ -1,0 +1,590 @@
+# ============================================================================
+# TEMP_PRO-1 W BATTERY — WiFi + Home Assistant API + Deep Sleep
+# ----------------------------------------------------------------------------
+# Purpose: measure real WiFi+HA battery life on TEMP_PRO-1 hardware.
+#
+# Design:
+#   - WiFi with captive portal (first-time SSID/password onboarding).
+#   - ESPHome native API → Home Assistant (no MQTT).
+#   - Self-contained (does NOT include Core.yaml / Core_MQTT.yaml). The
+#     standard Cores carry sensors and logic we don't need for a clean
+#     battery-life test; bundling them blows up the wake budget.
+#   - Wake cycle: GPIO7 hold release → WiFi assoc → API connect →
+#     read SHT + battery → brief settle → deep_sleep.enter.
+#   - Accessory rail (GPIO7) is cut at on_shutdown so SHT/MAX17048 stop
+#     drawing current during sleep. Mirrors the proven MQTT_ETH variant.
+#   - No SEN55, no Dallas, no buzzer — those add wake time/power and
+#     aren't needed to measure the WiFi+SHT lower bound.
+#
+# Defaults:
+#   - 60 min sleep / 30 s max wake (safety-net forces sleep after 30 s).
+#   - LED off during wake (toggle via web UI for visual confirmation).
+#   - prevent_sleep ON — fresh flash stays awake. Flip OFF (HA, web UI,
+#     or 3x boot-button press) to start the battery-life test cycle.
+# ============================================================================
+
+substitutions:
+  version: "26.1.21.1-w-bat"
+  device_description: TEMP_PRO-1 W BATTERY made by Apollo Automation - version ${version}.
+
+esphome:
+  name: "apollo-temp-pro-1-w-bat"
+  friendly_name: Apollo TEMP_PRO-1 W BAT
+  comment: Apollo TEMP_PRO-1 WiFi Battery-Test Firmware
+  name_add_mac_suffix: true
+  platformio_options:
+    board_build.flash_mode: dio
+
+  project:
+    name: "ApolloAutomation.TEMP_PRO-1-W-BAT"
+    version: "${version}"
+
+  min_version: 2025.2.0
+
+  # Cut the accessory rail AFTER ESPHome's normal teardown (WiFi/API stop at
+  # ~250). Holding GPIO7 LOW through deep sleep keeps SHT3x + MAX17048
+  # powered down while the ESP is asleep.
+  on_shutdown:
+    - priority: 300
+      then:
+        - lambda: |-
+            gpio_set_direction(GPIO_NUM_7, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_7, 0);
+            gpio_hold_en(GPIO_NUM_7);
+            gpio_deep_sleep_hold_en();
+            ESP_LOGW("Apollo", "on_shutdown: accessory power OFF, GPIO7 held LOW");
+
+  on_boot:
+    # Very early — release the GPIO7 deep-sleep hold so accessory power
+    # comes back up, and log why we woke.
+    - priority: 1200
+      then:
+        - lambda: |-
+            gpio_hold_dis(GPIO_NUM_7);
+            esp_sleep_wakeup_cause_t wc = esp_sleep_get_wakeup_cause();
+            const char *cause;
+            if (wc == ESP_SLEEP_WAKEUP_TIMER) {
+              cause = "timer";
+            } else if (wc == ESP_SLEEP_WAKEUP_EXT0) {
+              cause = "button";
+            } else {
+              esp_reset_reason_t rr = esp_reset_reason();
+              if (rr == ESP_RST_POWERON)        cause = "power-on";
+              else if (rr == ESP_RST_SW)        cause = "software-restart";
+              else if (rr == ESP_RST_DEEPSLEEP) cause = "deep-sleep-unknown";
+              else                              cause = "other";
+            }
+            id(wake_reason_str) = cause;
+            ESP_LOGW("Apollo", "Wake cause: %s — GPIO7 hold released", cause);
+
+    # After components init but before main loop. Set sleep duration from
+    # the (NVS-restored) number, increment wake counter, apply prevent_sleep.
+    - priority: -100
+      then:
+        - lambda: |-
+            id(boot_count) += 1;
+            ESP_LOGW("Apollo", "Boot count: %u", (unsigned)id(boot_count));
+            // sleep_duration_min is in MINUTES
+            id(deep_sleep_1).set_sleep_duration(
+              id(sleep_duration_min).state * 60 * 1000);
+        - if:
+            condition:
+              switch.is_on: prevent_sleep
+            then:
+              - lambda: |-
+                  ESP_LOGW("Apollo", "prevent_sleep ON — deep sleep blocked, "
+                           "device will stay awake");
+                  id(deep_sleep_1).prevent_deep_sleep();
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      # WiFi only — kill Bluetooth radio. ~10 mA saved while awake.
+      CONFIG_BT_ENABLED: n
+      # 160 MHz is plenty for WiFi + I2C. Lower clock = less awake-draw.
+      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160: y
+
+dashboard_import:
+  package_import_url: github://ApolloAutomation/TEMP_PROJECT-1/Integrations/ESPHome/TEMP_PRO-1_W_BATTERY.yaml
+  import_full_config: false
+
+external_components:
+  - source: github://ApolloAutomation/esphome-battery-component
+    components: [max17048]
+
+# ------------------------------------------------------------------ globals
+globals:
+  # Wake counter across deep sleep (NVS).
+  - id: boot_count
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  # Last wake reason (timer/button/power-on/...). Captured in on_boot.
+  - id: wake_reason_str
+    type: std::string
+    restore_value: no
+    initial_value: '"unknown"'
+
+# ------------------------------------------------------------------- api
+api:
+  # No reboot on API loss — the device routinely "loses" API when it sleeps.
+  reboot_timeout: 0s
+  # The work cycle lives here: when HA accepts the connection, take a
+  # reading, give HA a moment to ack, then deep_sleep.enter.
+  on_client_connected:
+    then:
+      - logger.log: "HA API client connected"
+      # Kick off an immediate I2C read of both sensors instead of waiting
+      # for their 5 s update_interval to tick. SHT3x measurement completes
+      # in ~15 ms; MAX17048 in <1 ms. Without this we could wait up to a
+      # full polling cycle for fresh values.
+      - component.update: sht3xd_sensor
+      - component.update: max_17048
+      # Wait for non-NaN values. With the forced update above, this almost
+      # always returns within 50–100 ms. 10 s cap is the I2C-wedge backstop;
+      # the safety-net interval also catches stuck wakes at 30 s.
+      - wait_until:
+          condition:
+            lambda: |-
+              return !std::isnan(id(sht_temperature).state) &&
+                     !std::isnan(id(sht_humidity).state) &&
+                     !std::isnan(id(batt_pct).state);
+          timeout: 10s
+      # Optional visual indicator — off by default to save power.
+      - if:
+          condition:
+            switch.is_on: battery_led_on_wake
+          then:
+            - lambda: |-
+                float batt = id(batt_pct).state;
+                auto call = id(rgb_light).turn_on();
+                call.set_brightness(0.25f);
+                call.set_transition_length(0);
+                if      (batt >= 50.0f) call.set_rgb(0.0f, 0.0f, 1.0f);  // blue OK
+                else if (batt >= 20.0f) call.set_rgb(1.0f, 1.0f, 0.0f);  // yellow low
+                else                    call.set_rgb(1.0f, 0.0f, 0.0f);  // red critical
+                call.perform();
+            - delay: 1s
+            - light.turn_off: rgb_light
+      # ESPHome's API auto-pushes sensor state on the client_connected
+      # callback. 400 ms is enough slack for HA to ack a handful of small
+      # numeric updates over a healthy WiFi link, plus the 500 ms tail in
+      # prepare_and_sleep before deep_sleep.enter actually fires.
+      - delay: 400ms
+      # Only sleep if the operator hasn't explicitly held us awake.
+      - if:
+          condition:
+            switch.is_off: prevent_sleep
+          then:
+            - script.execute: prepare_and_sleep
+
+# ------------------------------------------------------------------- OTA
+ota:
+  # `esphome upload` over the network during a wake (must be inside the
+  # max_wake_time_s window — turn on prevent_sleep first via web UI).
+  - platform: esphome
+    id: ota_esphome
+  # Backend for the `update.http_request` self-update flow below.
+  - platform: http_request
+    id: ota_managed
+  # Web-UI .bin upload — same caveat as above.
+  - platform: web_server
+
+safe_mode:
+
+# ------------------------------------------------------------------- HTTP-OTA self-update
+http_request:
+  verify_ssl: true
+
+update:
+  - platform: http_request
+    id: update_http_request
+    name: Firmware Update
+    source: https://apolloautomation.github.io/TEMP_PROJECT-1/firmware-w-bat/manifest.json
+
+logger:
+
+# ------------------------------------------------------------------- WiFi
+wifi:
+  # No `ssid:`/`password:` here — the captive portal collects them on first
+  # boot and ESPHome persists them in NVS. Empty AP fallback below means a
+  # tech can re-onboard a deployed device by power-cycling near a phone.
+  ap:
+    ssid: "Apollo TEMP_PRO-1 W-BAT Hotspot"
+  # Don't auto-reboot on association loss — we lose WiFi every sleep cycle
+  # by design. Default 15-min reboot timer would loop forever.
+  reboot_timeout: 0s
+  # 32 s power-save tick. Doesn't matter much given we sleep most of the
+  # time, but every bit counts.
+  power_save_mode: HIGH
+
+captive_portal:
+
+# Lets a tech reach the device at http://apollo-temp-pro-1-w-bat-<mac>.local/
+# during the brief wake window.
+mdns:
+
+# ------------------------------------------------------------------- web server
+web_server:
+  port: 80
+  version: 3
+  include_internal: false
+
+# ------------------------------------------------------------------- I2C
+i2c:
+  sda: GPIO16
+  scl: GPIO17
+  id: bus_a
+
+# ------------------------------------------------------------------- deep sleep
+deep_sleep:
+  id: deep_sleep_1
+  sleep_duration: 60min   # overwritten in on_boot from sleep_duration_min
+  # Button press wakes from sleep. ~5 µA penalty during sleep — negligible.
+  wakeup_pin:
+    number: GPIO0
+    inverted: true
+    allow_other_uses: true
+    ignore_strapping_warning: true  # GPIO0 is also a strapping pin; safe here
+    mode:
+      input: true
+      pullup: true
+  wakeup_pin_mode: INVERT_WAKEUP
+
+# ------------------------------------------------------------------- binary sensors
+binary_sensor:
+  - platform: status
+    name: Online
+    id: ink_ha_connected
+
+  - platform: gpio
+    pin:
+      number: GPIO0
+      inverted: true
+      allow_other_uses: true   # shared with deep_sleep wakeup_pin
+      ignore_strapping_warning: true
+      mode:
+        input: true
+        pullup: true
+    id: reset_button
+    internal: true
+    on_multi_click:
+      # Triple click — toggle Prevent Sleep.
+      # Solid RED 3 s   = prevent_sleep ON  (stays awake — "STOP, no sleep")
+      # Solid GREEN 3 s = prevent_sleep OFF (will sleep — "GO, run the test")
+      # Same color convention as the MQTT variants' power_source toggle.
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at most 0.5s
+          - ON for at most 0.5s
+          - OFF for at most 0.5s
+          - ON for at most 0.5s
+          - OFF for at least 0.3s
+        then:
+          - if:
+              condition:
+                switch.is_on: prevent_sleep
+              then:
+                - switch.turn_off: prevent_sleep
+                - logger.log: "3x click: Prevent Sleep OFF — battery test resumes on next sleep"
+                - light.turn_on:
+                    id: rgb_light
+                    brightness: 25%
+                    red: 0%
+                    green: 100%
+                    blue: 0%
+              else:
+                - switch.turn_on: prevent_sleep
+                - logger.log: "3x click: Prevent Sleep ON — device will stay awake"
+                - light.turn_on:
+                    id: rgb_light
+                    brightness: 25%
+                    red: 100%
+                    green: 0%
+                    blue: 0%
+          - delay: 3s
+          - light.turn_off: rgb_light
+      # 10-second hold — factory reset (clears WiFi creds, all NVS state).
+      - timing:
+          - ON for at least 10s
+        then:
+          - lambda: 'id(factory_reset_switch).turn_on();'
+      # Single click — flash a color reporting WiFi/HA-API state.
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at least 0.5s
+        then:
+          - script.execute: statusCheck
+
+# ------------------------------------------------------------------- sensors
+sensor:
+  # SHT3x — the actual subject under test. Internal: false so HA sees it.
+  - platform: sht3xd
+    id: sht3xd_sensor
+    temperature:
+      name: "Temperature"
+      id: sht_temperature
+      accuracy_decimals: 1
+      unit_of_measurement: "°F"
+      filters:
+        - lambda: 'return x * 9.0 / 5.0 + 32.0;'
+    humidity:
+      name: "Relative Humidity"
+      id: sht_humidity
+      accuracy_decimals: 1
+    update_interval: 5s
+
+  # Battery — needed to read drain over the test run.
+  - platform: max17048
+    id: max_17048
+    battery_voltage:
+      name: Battery voltage
+      id: batt_v
+    battery_level:
+      name: Battery level
+      id: batt_pct
+      filters:
+        - lambda: 'if (x > 100) return 100; else return x;'
+
+  # Internal die temp — cheap diagnostic, shows thermal state per wake.
+  - platform: internal_temperature
+    name: "ESP Temperature"
+    id: esp_internal_temp
+    entity_category: diagnostic
+    unit_of_measurement: "°F"
+    filters:
+      - lambda: 'return x * 9.0 / 5.0 + 32.0;'
+
+  # Wake count exposed for HA logging — divide observed total-drain by
+  # this to get %/wake on the dashboard.
+  - platform: template
+    name: "Boot Count"
+    id: boot_count_sensor
+    icon: mdi:counter
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return (float)id(boot_count);'
+
+  - platform: uptime
+    name: Uptime
+    id: sys_uptime
+    update_interval: 30s
+    entity_category: diagnostic
+
+# ------------------------------------------------------------------- text sensors
+text_sensor:
+  - platform: template
+    name: "Wake Reason"
+    id: wake_reason_sensor
+    icon: mdi:alarm
+    entity_category: diagnostic
+    lambda: 'return {id(wake_reason_str)};'
+    update_interval: 30s
+
+# ------------------------------------------------------------------- numbers
+number:
+  - platform: template
+    name: "Sleep Duration"
+    id: sleep_duration_min
+    min_value: 1
+    max_value: 1440
+    step: 1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 60
+    icon: "mdi:timer-sand"
+    entity_category: CONFIG
+    unit_of_measurement: "min"
+    # Apply changes immediately so the upcoming deep_sleep.enter uses the
+    # new value, not the value loaded at boot. Without this handler the
+    # new value still gets persisted (restore_value: true) but only takes
+    # effect the wake AFTER next — a one-cycle lag that's confusing when
+    # tuning from HA or the web UI.
+    on_value:
+      then:
+        - lambda: |-
+            uint32_t ms = (uint32_t)(x * 60.0f * 1000.0f);
+            id(deep_sleep_1).set_sleep_duration(ms);
+            ESP_LOGW("Apollo", "Sleep Duration set to %.0f min (%u ms) — applies to next sleep", x, ms);
+
+  # Safety-net cap on per-wake duration. The interval below force-sleeps
+  # if the wake exceeds this — protects against a stuck WiFi associate
+  # draining the cell over a single bad day.
+  - platform: template
+    name: "Max Wake Time"
+    id: max_wake_time_s
+    min_value: 15
+    max_value: 180
+    step: 1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    icon: "mdi:timer-alert"
+    entity_category: CONFIG
+    unit_of_measurement: "s"
+
+# ------------------------------------------------------------------- switches
+switch:
+  - platform: factory_reset
+    id: factory_reset_switch
+    internal: true
+
+  # Powers SHT3x and MAX17048 via GPIO7. ALWAYS_ON so wake = power-up;
+  # on_shutdown drives it LOW and locks it so sleep = power-down.
+  - platform: gpio
+    pin: GPIO7
+    name: "Accessory Power"
+    id: accessory_power
+    restore_mode: ALWAYS_ON
+    setup_priority: 1100
+    internal: true
+
+  # Default ON — fresh flash stays awake so the operator can configure
+  # WiFi, approve in HA, and inspect the web UI without the device
+  # disappearing every 30 s. Flip OFF (via web UI, HA, or 3x boot-button
+  # press) to start the battery-life test.
+  - platform: template
+    name: "Prevent Sleep"
+    id: prevent_sleep
+    icon: mdi:sleep-off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: "config"
+    on_turn_on:
+      then:
+        - lambda: 'id(deep_sleep_1).prevent_deep_sleep();'
+    on_turn_off:
+      then:
+        - lambda: 'id(deep_sleep_1).allow_deep_sleep();'
+
+  # Brief LED on every wake. Costs ~50 mW for ~1 s per wake — not free.
+  # Default OFF; turn ON when you want visual confirmation that wakes
+  # are firing on schedule.
+  - platform: template
+    name: "Battery LED on Wake"
+    id: battery_led_on_wake
+    icon: mdi:led-on
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: "config"
+
+# ------------------------------------------------------------------- light
+light:
+  - platform: esp32_rmt_led_strip
+    id: rgb_light
+    name: "RGB Light"
+    pin: GPIO4
+    default_transition_length: 0s
+    chipset: WS2812
+    num_leds: 4
+    rgb_order: grb
+    entity_category: "diagnostic"
+
+# ------------------------------------------------------------------- buttons
+button:
+  - platform: restart
+    icon: mdi:power-cycle
+    name: "ESP Reboot"
+    id: esp_reboot
+
+  - platform: factory_reset
+    disabled_by_default: True
+    name: "Factory Reset ESP"
+    id: factory_reset_all
+
+  # End the current wake immediately and deep-sleep. Useful when you've
+  # finished a manual debug session and want the test cycle to resume.
+  - platform: template
+    name: "Force Sleep"
+    id: button_force_sleep
+    icon: mdi:power-sleep
+    entity_category: "diagnostic"
+    on_press:
+      - lambda: 'ESP_LOGW("Apollo", "Force Sleep pressed");'
+      - switch.turn_off: prevent_sleep
+      - script.execute: prepare_and_sleep
+
+  - platform: template
+    name: "Update Firmware"
+    id: update_firmware
+    entity_category: config
+    on_press:
+      then:
+        - lambda: 'id(update_http_request).perform(true);'
+
+# ------------------------------------------------------------------- intervals
+interval:
+  # Safety net — force sleep if a wake runs longer than max_wake_time_s.
+  # Catches stuck WiFi association / DHCP / API handshake. Without this
+  # one bad day could chew through the cell on a single wake.
+  - interval: 5s
+    startup_delay: 15s
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_off: prevent_sleep
+              - lambda: 'return (millis() / 1000.0f) > id(max_wake_time_s).state;'
+          then:
+            - lambda: |-
+                ESP_LOGW("Apollo", "Max wake time (%.0f s) reached — forcing sleep",
+                         id(max_wake_time_s).state);
+            - script.execute: prepare_and_sleep
+
+# ------------------------------------------------------------------- scripts
+script:
+  - id: prepare_and_sleep
+    then:
+      - lambda: |-
+          ESP_LOGW("Apollo", "Preparing for deep sleep (awake for %.1f s)...",
+                   millis() / 1000.0f);
+      # 500 ms slack for any pending API frames before WiFi tears down.
+      - delay: 500ms
+      - light.turn_off: rgb_light
+      - deep_sleep.enter:
+          id: deep_sleep_1
+
+  # Single-click on the boot button — flashes a color reporting the
+  # current WiFi/HA-API state. Cheap operator gesture; no other side
+  # effects.
+  - id: statusCheck
+    then:
+      - if:
+          condition:
+            - lambda: 'return id(ink_ha_connected).state;'
+          then:
+            - light.turn_on:
+                id: rgb_light
+                brightness: 25%
+                red: 0%
+                green: 0%
+                blue: 100%
+          else:
+            - if:
+                condition:
+                  - wifi.connected
+                then:
+                  - light.turn_on:
+                      id: rgb_light
+                      brightness: 25%
+                      red: 0%
+                      green: 100%
+                      blue: 0%
+                else:
+                  - light.turn_on:
+                      id: rgb_light
+                      brightness: 25%
+                      red: 100%
+                      green: 100%
+                      blue: 0%
+      - delay: 3s
+      - light.turn_off: rgb_light
