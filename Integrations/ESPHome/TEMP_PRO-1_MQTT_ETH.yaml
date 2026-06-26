@@ -259,6 +259,10 @@ mqtt:
   on_connect:
     then:
       - logger.log: "Connected to MQTT broker"
+      # Stamp connect time — apply_power_mode_command (Core_MQTT.yaml) uses
+      # this to reject stale retained "battery" commands replayed by the
+      # broker right after subscribe.
+      - lambda: 'id(mqtt_connected_at_ms) = millis() ? millis() : 1;'
       # Boot-loop cooldown: if check_boot_loop set this flag in on_boot, skip
       # everything and head straight to sleep. The 30-min sleep gives whatever
       # is causing the loop a chance to clear (e.g. transient hardware glitch,
@@ -285,9 +289,10 @@ mqtt:
       # Wired devices weren't affected (they stay awake). Battery devices
       # silently lost every wake's data.
       #
-      # Drain protection now relies on check_battery_drain (in Core_MQTT.yaml)
-      # which catches a wired-power loss within 30 min of sustained drop —
-      # slower than the scrub but doesn't compromise per-wake publishing.
+      # The drain-detector that replaced it was later removed too (2026-06-11):
+      # the fleet is fully hard-wired and the detector was falsely flipping
+      # wired devices into battery mode. power_source is operator-controlled
+      # only now.
       #
       # If we ever need the scrub back, move it AFTER publish_mqtt_data so
       # it doesn't compete with data publishes for outbox bandwidth.
@@ -352,17 +357,10 @@ mqtt:
       # Critical-battery check — if pct < threshold on a battery device,
       # extend the next sleep duration (operator still sees this wake's data).
       - script.execute: check_critical_battery
-      # Drain-rate safety check — must run AFTER battery is valid (so we have
-      # a current reading) and BEFORE publish (so the status flag goes out in
-      # the same wake cycle if the alarm trips, including a possible flip from
-      # wired→battery that we want reflected in meta/power_source).
-      - script.execute: check_battery_drain
       # Publish all MQTT data once
       - script.execute: publish_mqtt_data
       # Self-heal scrub disabled — even at 3 topics it crowded the QoS 1
-      # outbox enough that battery wakes lost data publishes. Drain detector
-      # in check_battery_drain catches any rogue wired flip within 30 min,
-      # which is the safety property the scrub was protecting.
+      # outbox enough that battery wakes lost data publishes.
       # Wait for the esp-idf MQTT outbox to drain before sleeping.
       # 10s was the empirically-confirmed working value — shorter delays
       # caused battery devices to lose data even without the scrub.
@@ -383,33 +381,33 @@ mqtt:
         - button.press: esp_reboot
 
     # ============================================================
-    # Power-mode commands. Two payload conventions, both supported:
-    #   • New: "battery" / "wired" → set power_source directly
-    #   • Legacy: "ON" (= wired) / "OFF" (= battery) for clients still using
-    #     the old prevent_sleep semantics. The legacy `command/prevent_sleep`
-    #     topic name is also accepted and routes through the same handler.
+    # Power-mode commands. Payloads: "battery"/"wired" (canonical) or
+    # "ON" (= wired) / "OFF" (= battery) (legacy values, still accepted).
     #
     # Three topic flavors for fleet targeting:
     #   • apollo/temp-pro-1/command/power_source         → all devices
     #   • apollo/temp-pro-1/battery/command/power_source → battery devices only
     #   • apollo/temp-pro-1/wired/command/power_source   → wired devices only
-    # Plus the legacy `prevent_sleep` topic on the same three flavors.
+    #
+    # All three route through apply_power_mode_command (Core_MQTT.yaml),
+    # which rejects any "battery" payload arriving within 60s of MQTT
+    # connect — that's a stale RETAINED message replayed by the broker at
+    # subscribe time, which was falsely flipping wired devices into
+    # battery mode. The guard also clears the offending retained message
+    # at the broker so it can't replay again.
+    #
+    # The legacy `command/prevent_sleep` topic subscriptions were REMOVED
+    # (2026-06-11): a stale retained "OFF" on them silently put wired
+    # devices to sleep. If an Ignition tag binding or operator script
+    # still publishes to prevent_sleep topics, delete the binding and use
+    # command/power_source instead.
     # ============================================================
     - topic: apollo/temp-pro-1/command/power_source
       then:
-        - lambda: |-
-            std::string mode;
-            if (x == "wired" || x == "ON" || x == "on" || x == "1" || x == "true") {
-              mode = "wired";
-            } else if (x == "battery" || x == "OFF" || x == "off" || x == "0" || x == "false") {
-              mode = "battery";
-            } else {
-              ESP_LOGW("Apollo", "Unknown power_source payload: %s", x.c_str());
-              return;
-            }
-            auto call = id(power_source).make_call();
-            call.set_option(mode);
-            call.perform();
+        - script.execute:
+            id: apply_power_mode_command
+            payload: !lambda 'return x;'
+            cmd_topic: "apollo/temp-pro-1/command/power_source"
 
     - topic: apollo/temp-pro-1/battery/command/power_source
       then:
@@ -417,14 +415,10 @@ mqtt:
             condition:
               lambda: 'return id(power_source).current_option() == "battery";'
             then:
-              - lambda: |-
-                  std::string mode;
-                  if (x == "wired" || x == "ON") mode = "wired";
-                  else if (x == "battery" || x == "OFF") mode = "battery";
-                  else return;
-                  auto call = id(power_source).make_call();
-                  call.set_option(mode);
-                  call.perform();
+              - script.execute:
+                  id: apply_power_mode_command
+                  payload: !lambda 'return x;'
+                  cmd_topic: "apollo/temp-pro-1/battery/command/power_source"
 
     - topic: apollo/temp-pro-1/wired/command/power_source
       then:
@@ -432,49 +426,10 @@ mqtt:
             condition:
               lambda: 'return id(power_source).current_option() == "wired";'
             then:
-              - lambda: |-
-                  std::string mode;
-                  if (x == "wired" || x == "ON") mode = "wired";
-                  else if (x == "battery" || x == "OFF") mode = "battery";
-                  else return;
-                  auto call = id(power_source).make_call();
-                  call.set_option(mode);
-                  call.perform();
-
-    # Legacy prevent_sleep topics — same effect, routed to power_source.
-    # ON  → wired, OFF → battery. Kept for backward compatibility with any
-    # operator scripts or Ignition tag bindings that still publish here.
-    - topic: apollo/temp-pro-1/command/prevent_sleep
-      then:
-        - lambda: |-
-            std::string mode = (x == "ON" || x == "on" || x == "1" || x == "true") ? "wired" : "battery";
-            auto call = id(power_source).make_call();
-            call.set_option(mode);
-            call.perform();
-
-    - topic: apollo/temp-pro-1/battery/command/prevent_sleep
-      then:
-        - if:
-            condition:
-              lambda: 'return id(power_source).current_option() == "battery";'
-            then:
-              - lambda: |-
-                  std::string mode = (x == "ON" || x == "on") ? "wired" : "battery";
-                  auto call = id(power_source).make_call();
-                  call.set_option(mode);
-                  call.perform();
-
-    - topic: apollo/temp-pro-1/wired/command/prevent_sleep
-      then:
-        - if:
-            condition:
-              lambda: 'return id(power_source).current_option() == "wired";'
-            then:
-              - lambda: |-
-                  std::string mode = (x == "ON" || x == "on") ? "wired" : "battery";
-                  auto call = id(power_source).make_call();
-                  call.set_option(mode);
-                  call.perform();
+              - script.execute:
+                  id: apply_power_mode_command
+                  payload: !lambda 'return x;'
+                  cmd_topic: "apollo/temp-pro-1/wired/command/power_source"
 
     # RGB Light ON - turns on white at full brightness
     - topic: apollo/temp-pro-1/command/light/on
