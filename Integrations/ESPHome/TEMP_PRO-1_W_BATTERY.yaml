@@ -233,6 +233,12 @@ web_server:
   port: 80
   version: 3
   include_internal: false
+  # Same basic-auth pair as the MQTT family (secrets.yaml). Without this the
+  # rig exposed unauthenticated web OTA and factory reset on the plant subnet
+  # during wake windows.
+  auth:
+    username: !secret web_auth_username
+    password: !secret web_auth_password
 
 # ------------------------------------------------------------------- I2C
 i2c:

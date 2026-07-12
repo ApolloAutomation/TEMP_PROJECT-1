@@ -134,10 +134,13 @@ web_server:
   # Hide internal-only entities (e.g. SEN55 cumulative mass values) from the UI.
   # Entities we want visible have `internal: true` removed.
   include_internal: false
-  # HTTP basic auth — for deployment, move password to !secret.
+  # HTTP basic auth. Values live in the gitignored secrets.yaml (see
+  # secrets.yaml.example). Do NOT remove this block: the on_boot web-auth
+  # override lambdas in the variant files only take effect when compile-time
+  # auth exists to override.
   auth:
-    username: admin
-    password: tmna
+    username: !secret web_auth_username
+    password: !secret web_auth_password
 
 deep_sleep:
   id: deep_sleep_1
