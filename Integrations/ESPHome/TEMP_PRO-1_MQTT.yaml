@@ -10,7 +10,7 @@ esphome:
     name: "ApolloAutomation.TEMP_PRO-1-MQTT"
     version: "${version}"
 
-  min_version: 2025.2.0
+  min_version: 2026.1.0
 
   on_boot:
     # Priority 1200 — runs very early, before most components init.
@@ -93,7 +93,11 @@ esphome:
               if (id(max_wake_time_s).state < 45.0f) {
                 ESP_LOGW("Apollo", "Max Wake Time was %.0f s — auto-correcting to 45 s (one-time)",
                          id(max_wake_time_s).state);
-                id(max_wake_time_s).publish_state(45.0f);
+                // make_call persists to NVS; publish_state alone was RAM-only
+                // and the correction was lost on the next boot.
+                auto call = id(max_wake_time_s).make_call();
+                call.set_value(45.0f);
+                call.perform();
               }
               id(max_wake_time_reset_done) = true;
               ESP_LOGW("Apollo", "max_wake_time_reset_done flag set to true (one-time check complete)");
@@ -101,8 +105,9 @@ esphome:
         # Capture WHY this wake happened (timer/button/cold_boot) — published
         # as meta/wake_reason and shown in the diagnostic summary log.
         - script.execute: capture_wake_reason
-        # Detect rapid-boot loops (≥3 consecutive cold boots). If detected,
-        # the script flips to battery and forces 30-min cooldown sleep.
+        # Detect rapid-boot loops (≥3 consecutive cold boots). Battery devices
+        # get a 30-min cooldown sleep; wired devices stay awake and are
+        # flagged via the health rollup. power_source is never auto-flipped.
         - script.execute: check_boot_loop
         # Wired-mode latch: if power_source is wired, prevent deep sleep so
         # the device stays awake continuously.
@@ -118,10 +123,12 @@ esphome:
         # Read SEN55 serial + firmware once per wake (cached in globals)
         - script.execute: read_sen55_info
 
-  # ESPHome runs on_shutdown handlers in priority-descending order. We cut
-  # accessory power AFTER MQTT teardown (priority ~250) but BEFORE deep sleep
-  # entry. Cutting power earlier hangs SPI shutdown on the W5500. (Same
-  # rationale as the ETH variant — it's the same hardware.)
+  # ESPHome runs shutdown hooks in REVERSE of the setup-priority-sorted
+  # component list, i.e. ascending priority — so this priority-300 handler
+  # runs AFTER WiFi/MQTT teardown (~250) and BEFORE deep sleep entry. Cutting
+  # the accessory rail after network teardown mirrors the ETH variant, where
+  # cutting W5500 power mid-teardown hung SPI shutdown; on this WiFi variant
+  # it keeps the SHT3x/MAX17048 powered until their I2C traffic is done.
   on_shutdown:
     - priority: 300
       then:
@@ -135,9 +142,40 @@ esphome:
 ota:
   - platform: esphome
     id: ota_esphome
+    on_begin:
+      then:
+        - lambda: |-
+            id(ota_in_progress) = true;
+            ESP_LOGW("Apollo", "OTA started — wake-time cap suspended (10 min failsafe)");
+    on_end:
+      then:
+        - lambda: 'id(ota_in_progress) = false;'
+    on_error:
+      then:
+        - lambda: |-
+            id(ota_in_progress) = false;
+            ESP_LOGE("Apollo", "OTA failed (error %d) — wake-time cap re-armed", x);
+  # Web upload runs in the httpd task while the main loop keeps ticking, so
+  # the wake-time cap could previously deep-sleep a battery unit mid-upload —
+  # the ota_in_progress flag prevents that.
   - platform: web_server
+    id: ota_web
+    on_begin:
+      then:
+        - lambda: |-
+            id(ota_in_progress) = true;
+            ESP_LOGW("Apollo", "Web OTA started — wake-time cap suspended (10 min failsafe)");
+    on_end:
+      then:
+        - lambda: 'id(ota_in_progress) = false;'
+    on_error:
+      then:
+        - lambda: |-
+            id(ota_in_progress) = false;
+            ESP_LOGE("Apollo", "Web OTA failed (error %d) — wake-time cap re-armed", x);
 
 safe_mode:
+  id: safe_mode_1
 
 logger:
 
@@ -217,7 +255,10 @@ mqtt:
             lambda: 'return id(boot_loop_force_sleep);'
           then:
             - lambda: 'ESP_LOGE("Apollo", "Boot loop active — sleeping 30 min for cooldown");'
-            - delay: 1s
+            # Tell the operator WHY the device is about to go silent —
+            # health=CRITICAL + wake_reason, retained (2 publishes, QoS 1).
+            - script.execute: publish_boot_loop_alert
+            - delay: 3s  # drain the two alert publishes + flush logs
             - script.execute: prepare_and_sleep
       # Wait for SEN55 to stabilize — duration configurable via "Warm-up Delay".
       # Self-adjusts via millis(): if MQTT took longer than warmup to connect,
@@ -255,6 +296,14 @@ mqtt:
       # Wait for the esp-idf MQTT outbox to drain before sleeping.
       # 10s was the empirically-confirmed working value.
       - delay: 10s
+      # Connected to the broker and drained a full publish batch — this boot
+      # is good. With OTA rollback active (ota + safe_mode on ESP-IDF), the
+      # image must be marked valid before the next reset or the bootloader
+      # reverts it. Battery wakes end before safe_mode's 60 s auto-mark, so
+      # without this an OTA'd battery unit ran the new image for exactly one
+      # wake and silently rolled back. Marking only after a successful publish
+      # keeps real rollback protection for images that cannot reach the broker.
+      - lambda: 'id(safe_mode_1).mark_successful();'
       # Battery devices sleep here. Wired devices skip — they stay awake and
       # rely on the periodic publish-while-wired interval for ongoing data.
       - if:
@@ -264,11 +313,26 @@ mqtt:
             - script.execute: prepare_and_sleep
 
   on_message:
-    # Restart command
+    # Restart command. Guarded like power_source: empty payloads are
+    # retained-clear replays; any payload arriving <60s after MQTT connect is
+    # almost certainly a stale RETAINED message replayed by the broker at
+    # subscribe time — one retained restart would otherwise reboot-loop every
+    # device on every connect. Rejected replays are cleared at the broker.
+    # Send restarts NON-retained to devices connected >60s (wired units).
+    # Battery units reboot on every wake anyway, so nothing is lost there.
     - topic: apollo/temp-pro-1/command/restart
       then:
-        - logger.log: "Restart command received via MQTT"
-        - button.press: esp_reboot
+        - lambda: |-
+            if (x.empty()) return;
+            uint32_t since_ms = millis() - id(mqtt_connected_at_ms);
+            if (id(mqtt_connected_at_ms) == 0 || since_ms < 60000) {
+              ESP_LOGE("Apollo", "REJECTED restart %.1fs after MQTT connect — stale retained replay. Clearing retained value; resend NON-retained once connected >60s.",
+                       since_ms / 1000.0f);
+              id(mqtt_client).publish("apollo/temp-pro-1/command/restart", "", 0, 0, true);
+              return;
+            }
+            ESP_LOGW("Apollo", "Restart command received via MQTT");
+            id(esp_reboot).press();
 
     # ============================================================
     # Power-mode commands. Payloads: "battery"/"wired" (canonical) or
@@ -392,9 +456,15 @@ mqtt:
     - topic: apollo/temp-pro-1/command/sleep_duration
       then:
         - lambda: |-
-            float minutes = atof(x.c_str());
-            if (minutes >= 1 && minutes <= 1440) {
-              id(deep_sleep_sleep_duration).publish_state(minutes);
+            char *end = nullptr;
+            float minutes = strtof(x.c_str(), &end);
+            if (end == x.c_str() || x.empty()) {
+              ESP_LOGW("Apollo", "Ignoring non-numeric sleep_duration payload: '%s'", x.c_str());
+            } else if (minutes >= 1 && minutes <= 1440) {
+              // make_call persists to NVS; publish_state alone reverted on reboot
+              auto call = id(deep_sleep_sleep_duration).make_call();
+              call.set_value(minutes);
+              call.perform();
               ESP_LOGI("Apollo", "Sleep duration set to %.0f minutes", minutes);
             } else {
               ESP_LOGW("Apollo", "Invalid sleep duration: %.2f (must be 1-1440 minutes)", minutes);
@@ -407,10 +477,17 @@ mqtt:
               lambda: 'return id(power_source).current_option() == "battery";'
             then:
               - lambda: |-
-                  float minutes = atof(x.c_str());
-                  if (minutes >= 1 && minutes <= 1440) {
-                    id(deep_sleep_sleep_duration).publish_state(minutes);
+                  char *end = nullptr;
+                  float minutes = strtof(x.c_str(), &end);
+                  if (end == x.c_str() || x.empty()) {
+                    ESP_LOGW("Apollo", "Ignoring non-numeric battery-class sleep_duration: '%s'", x.c_str());
+                  } else if (minutes >= 1 && minutes <= 1440) {
+                    auto call = id(deep_sleep_sleep_duration).make_call();
+                    call.set_value(minutes);
+                    call.perform();
                     ESP_LOGI("Apollo", "battery-class sleep_duration: %.0f min", minutes);
+                  } else {
+                    ESP_LOGW("Apollo", "Invalid battery-class sleep_duration: %.2f (1-1440)", minutes);
                   }
 
     - topic: apollo/temp-pro-1/wired/command/sleep_duration
@@ -420,10 +497,17 @@ mqtt:
               lambda: 'return id(power_source).current_option() == "wired";'
             then:
               - lambda: |-
-                  float minutes = atof(x.c_str());
-                  if (minutes >= 1 && minutes <= 1440) {
-                    id(deep_sleep_sleep_duration).publish_state(minutes);
+                  char *end = nullptr;
+                  float minutes = strtof(x.c_str(), &end);
+                  if (end == x.c_str() || x.empty()) {
+                    ESP_LOGW("Apollo", "Ignoring non-numeric wired-class sleep_duration: '%s'", x.c_str());
+                  } else if (minutes >= 1 && minutes <= 1440) {
+                    auto call = id(deep_sleep_sleep_duration).make_call();
+                    call.set_value(minutes);
+                    call.perform();
                     ESP_LOGI("Apollo", "wired-class sleep_duration: %.0f min", minutes);
+                  } else {
+                    ESP_LOGW("Apollo", "Invalid wired-class sleep_duration: %.2f (1-1440)", minutes);
                   }
 
     # Buzzer test - payload: RTTTL string or preset name (beep, siren, success, error)
