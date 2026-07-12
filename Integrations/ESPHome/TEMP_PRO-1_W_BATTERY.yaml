@@ -39,7 +39,7 @@ esphome:
     name: "ApolloAutomation.TEMP_PRO-1-W-BAT"
     version: "${version}"
 
-  min_version: 2025.2.0
+  min_version: 2026.1.0
 
   # Cut the accessory rail AFTER ESPHome's normal teardown (WiFi/API stop at
   # ~250). Holding GPIO7 LOW through deep sleep keeps SHT3x + MAX17048
@@ -109,7 +109,11 @@ esp32:
       CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160: y
 
 dashboard_import:
-  package_import_url: github://ApolloAutomation/TEMP_PROJECT-1/Integrations/ESPHome/TEMP_PRO-1_W_BATTERY.yaml
+  # Pinned to the mqtt_toy branch: without @ref the github:// shorthand clones
+  # the repo's DEFAULT branch (main), where this file does not exist, so every
+  # dashboard import failed. Drop the @mqtt_toy suffix when this file lands on
+  # main.
+  package_import_url: github://ApolloAutomation/TEMP_PROJECT-1/Integrations/ESPHome/TEMP_PRO-1_W_BATTERY.yaml@mqtt_toy
   import_full_config: false
 
 external_components:
@@ -154,6 +158,11 @@ api:
                      !std::isnan(id(sht_humidity).state) &&
                      !std::isnan(id(batt_pct).state);
           timeout: 10s
+      # Connected to HA and got fresh readings — this boot is good. With OTA
+      # rollback active (ota + safe_mode on ESP-IDF), the image must be marked
+      # valid before the next reset or the bootloader reverts it; test-cycle
+      # wakes end long before safe_mode's 60 s auto-mark.
+      - lambda: 'id(safe_mode_1).mark_successful();'
       # Optional visual indicator — off by default to save power.
       - if:
           condition:
@@ -161,6 +170,10 @@ api:
           then:
             - lambda: |-
                 float batt = id(batt_pct).state;
+                // NaN fails every comparison below and fell through to solid
+                // RED — a fuel-gauge glitch looked like a critical battery.
+                // The ETH variant guards this; mirror it.
+                if (std::isnan(batt)) return;
                 auto call = id(rgb_light).turn_on();
                 call.set_brightness(0.25f);
                 call.set_transition_length(0);
@@ -195,6 +208,7 @@ ota:
   - platform: web_server
 
 safe_mode:
+  id: safe_mode_1
 
 # ------------------------------------------------------------------- HTTP-OTA self-update
 http_request:
@@ -278,6 +292,10 @@ binary_sensor:
         pullup: true
     id: reset_button
     internal: true
+    # ESPHome 2026.3.0 lets raw contact bounce reach automations; a bouncy
+    # single press could pattern-match the triple-click. See Core_MQTT.yaml.
+    filters:
+      - delayed_on_off: 20ms
     on_multi_click:
       # Triple click — toggle Prevent Sleep.
       # Solid RED 3 s   = prevent_sleep ON  (stays awake — "STOP, no sleep")
