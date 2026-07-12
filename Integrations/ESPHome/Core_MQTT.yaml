@@ -55,6 +55,11 @@ esp32:
   board: esp32-s3-devkitc-1
   variant: esp32s3
   flash_size: 8MB
+  # Explicit, supported way to pin the clock. ESPHome 2026.4.0 flips the S3
+  # default to 240 MHz and emits its own CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240,
+  # so relying on the raw sdkconfig override below alone would silently
+  # double the clock (and the awake power draw) on the first toolchain bump.
+  cpu_frequency: 160MHZ
   framework:
     type: esp-idf
     sdkconfig_options:
@@ -64,7 +69,7 @@ esp32:
       CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160: y
 
 external_components:
-  - source: github://ApolloAutomation/esphome-battery-component
+  - source: github://ApolloAutomation/esphome-battery-component@2f24e89a2a4bb02cda63ab074585904cd58247c4
     components: [max17048]
 
 globals:
@@ -211,9 +216,41 @@ i2c:
 web_server:
   port: 80
   version: 3
+  # Serve the v3 frontend from flash instead of oi.esphome.io. Without this,
+  # the browser fetches the UI assets from an external CDN — a blank config
+  # page on any restricted or air-gapped network (exactly where these devices
+  # are deployed), and an external dependency at odds with local-first
+  # operation. The historical bug where local: true forced the v2 frontend
+  # was fixed in ESPHome 2024.5.0; 2026.3.1 ships a proper v3 local bundle.
+  local: true
   # Hide internal-only entities (e.g. SEN55 cumulative mass values) from the UI.
   # Entities we want visible have `internal: true` removed.
   include_internal: false
+  # Grouped layout for the v3 UI — without groups the page is one flat list
+  # of ~55 entities. Per-entity assignments live on each entity as
+  # web_server: {sorting_group_id, sorting_weight}.
+  sorting_groups:
+    - id: sg_live
+      name: "Live Readings"
+      sorting_weight: 10
+    - id: sg_calibration
+      name: "Calibration"
+      sorting_weight: 20
+    - id: sg_power
+      name: "Sleep and Power"
+      sorting_weight: 30
+    - id: sg_network
+      name: "MQTT and Network"
+      sorting_weight: 40
+    - id: sg_identity
+      name: "Identification"
+      sorting_weight: 50
+    - id: sg_maintenance
+      name: "Maintenance"
+      sorting_weight: 60
+    - id: sg_diag
+      name: "Diagnostics"
+      sorting_weight: 70
   # HTTP basic auth. Values live in the gitignored secrets.yaml (see
   # secrets.yaml.example). Do NOT remove this block: the on_boot web-auth
   # override lambdas in the variant files only take effect when compile-time
@@ -331,6 +368,9 @@ binary_sensor:
   - platform: template
     name: "Critical Battery (this wake)"
     id: critical_battery_binary
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 76
     icon: mdi:battery-alert
     entity_category: diagnostic
     lambda: 'return id(critical_battery_active);'
@@ -370,6 +410,9 @@ sensor:
     temperature:
       name: "Temperature"
       id: sht_temperature
+      web_server:
+        sorting_group_id: sg_live
+        sorting_weight: 11
       accuracy_decimals: 1
       unit_of_measurement: "°F"
       filters:
@@ -381,6 +424,9 @@ sensor:
     humidity:
       name: "Relative Humidity"
       id: sht_humidity
+      web_server:
+        sorting_group_id: sg_live
+        sorting_weight: 12
       accuracy_decimals: 1
       filters:
         # Per-unit calibration offset, clamped to the physical 0-100 % range.
@@ -398,6 +444,9 @@ sensor:
   # to get per-bucket values.
   - platform: template
     name: "PM 0.3 to 1 µm"
+    web_server:
+      sorting_group_id: sg_live
+      sorting_weight: 13
     lambda: |-
       if (std::isnan(id(pm_1_0).state)) return NAN;
       return std::max(0.0f, id(pm_1_0).state);
@@ -410,6 +459,9 @@ sensor:
 
   - platform: template
     name: "PM 1 to 2.5 µm"
+    web_server:
+      sorting_group_id: sg_live
+      sorting_weight: 14
     lambda: |-
       if (std::isnan(id(pm_1_0).state) || std::isnan(id(pm_2_5).state)) return NAN;
       return std::max(0.0f, id(pm_2_5).state - id(pm_1_0).state);
@@ -422,6 +474,9 @@ sensor:
 
   - platform: template
     name: "PM 2.5 to 4 µm"
+    web_server:
+      sorting_group_id: sg_live
+      sorting_weight: 15
     lambda: |-
       if (std::isnan(id(pm_2_5).state) || std::isnan(id(pm_4_0).state)) return NAN;
       return std::max(0.0f, id(pm_4_0).state - id(pm_2_5).state);
@@ -433,6 +488,9 @@ sensor:
 
   - platform: template
     name: "PM 4 to 10 µm"
+    web_server:
+      sorting_group_id: sg_live
+      sorting_weight: 16
     lambda: |-
       if (std::isnan(id(pm_4_0).state) || std::isnan(id(pm_10_0).state)) return NAN;
       return std::max(0.0f, id(pm_10_0).state - id(pm_4_0).state);
@@ -446,6 +504,9 @@ sensor:
   # Total PM mass (cumulative <10 µm — same as raw SEN55 pm_10_0).
   - platform: template
     name: "PM Total"
+    web_server:
+      sorting_group_id: sg_live
+      sorting_weight: 17
     lambda: |-
       if (std::isnan(id(pm_10_0).state)) return NAN;
       return std::max(0.0f, id(pm_10_0).state);
@@ -460,6 +521,9 @@ sensor:
   - platform: internal_temperature
     name: "ESP Temperature"
     id: esp_internal_temp
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 75
     update_interval: 60s
     entity_category: "diagnostic"
     unit_of_measurement: "°F"
@@ -472,9 +536,15 @@ sensor:
     battery_voltage:
       name: Battery voltage
       id: batt_v
+      web_server:
+        sorting_group_id: sg_live
+        sorting_weight: 19
     battery_level:
       name: Battery level
       id: batt_pct
+      web_server:
+        sorting_group_id: sg_live
+        sorting_weight: 18
       filters:
         # Clamp both ends: fuel-gauge glitches can report >100 or negative
         # SOC, and a negative value would permanently pollute the NVS-stored
@@ -490,6 +560,9 @@ sensor:
   - platform: template
     name: "SEN55 Fail Count"
     id: sen55_fail_count_sensor
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 80
     icon: mdi:alert-circle-outline
     entity_category: diagnostic
     accuracy_decimals: 0
@@ -499,6 +572,9 @@ sensor:
   - platform: template
     name: "SHT3x Fail Count"
     id: sht_fail_count_sensor
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 81
     icon: mdi:alert-circle-outline
     entity_category: diagnostic
     accuracy_decimals: 0
@@ -508,6 +584,9 @@ sensor:
   - platform: template
     name: "MAX17048 Fail Count"
     id: max17048_fail_count_sensor
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 82
     icon: mdi:alert-circle-outline
     entity_category: diagnostic
     accuracy_decimals: 0
@@ -519,6 +598,9 @@ sensor:
   - platform: template
     name: "Lifetime Min Battery"
     id: lifetime_min_battery_pct_sensor
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 83
     icon: mdi:battery-low
     entity_category: diagnostic
     accuracy_decimals: 1
@@ -531,6 +613,9 @@ sensor:
   - platform: template
     name: "Lifetime Max Battery"
     id: lifetime_max_battery_pct_sensor
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 84
     icon: mdi:battery-high
     entity_category: diagnostic
     accuracy_decimals: 1
@@ -543,6 +628,9 @@ sensor:
   - platform: template
     name: "Lifetime Min Battery Voltage"
     id: lifetime_min_battery_v_sensor
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 85
     icon: mdi:flash-off
     entity_category: diagnostic
     accuracy_decimals: 3
@@ -555,6 +643,9 @@ sensor:
   - platform: template
     name: "Lifetime Max Battery Voltage"
     id: lifetime_max_battery_v_sensor
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 86
     icon: mdi:flash
     entity_category: diagnostic
     accuracy_decimals: 3
@@ -567,6 +658,9 @@ sensor:
 light:
   - platform: esp32_rmt_led_strip
     id: rgb_light
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 90
     name: "RGB Light"
     pin: GPIO4
     default_transition_length: 0s
@@ -594,6 +688,9 @@ number:
   - platform: template
     name: "MQTT Port"
     id: mqtt_port_override
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 42
     min_value: 0
     max_value: 65535
     step: 1
@@ -618,6 +715,9 @@ number:
   - platform: template
     name: "Max Wake Time"
     id: max_wake_time_s
+    web_server:
+      sorting_group_id: sg_power
+      sorting_weight: 33
     min_value: 30
     max_value: 180
     step: 1
@@ -638,6 +738,9 @@ number:
   - platform: template
     name: "Critical Battery Threshold"
     id: critical_battery_threshold_pct
+    web_server:
+      sorting_group_id: sg_power
+      sorting_weight: 34
     min_value: 0
     max_value: 50
     step: 1
@@ -656,6 +759,9 @@ number:
   - platform: template
     name: "Critical Battery Sleep Duration"
     id: critical_battery_sleep_min
+    web_server:
+      sorting_group_id: sg_power
+      sorting_weight: 35
     min_value: 5
     max_value: 1440
     step: 1
@@ -673,6 +779,9 @@ number:
   - platform: template
     name: "Publish Interval"
     id: prevent_sleep_publish_interval_s
+    web_server:
+      sorting_group_id: sg_power
+      sorting_weight: 36
     min_value: 1
     max_value: 3600
     step: 1
@@ -691,6 +800,9 @@ number:
   - platform: template
     name: "SHT Temperature Offset"
     id: sht_temp_offset_f
+    web_server:
+      sorting_group_id: sg_calibration
+      sorting_weight: 21
     min_value: -10
     max_value: 10
     step: 0.1
@@ -706,6 +818,9 @@ number:
   - platform: template
     name: "SHT Humidity Offset"
     id: sht_hum_offset
+    web_server:
+      sorting_group_id: sg_calibration
+      sorting_weight: 22
     min_value: -20
     max_value: 20
     step: 0.5
@@ -723,6 +838,9 @@ number:
   - platform: template
     name: "Buzzer Volume"
     id: buzzer_volume_pct
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 65
     min_value: 0
     max_value: 100
     step: 5
@@ -747,6 +865,9 @@ number:
   - platform: template
     name: "Warm-up Delay"
     id: warmup_delay_s
+    web_server:
+      sorting_group_id: sg_calibration
+      sorting_weight: 23
     min_value: 0
     max_value: 60
     step: 1
@@ -772,6 +893,9 @@ number:
   - platform: template
     name: "MQTT QoS"
     id: qos_level
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 46
     min_value: 0
     max_value: 2
     step: 1
@@ -789,6 +913,9 @@ number:
   - platform: template
     name: "Sleep Duration"
     id: deep_sleep_sleep_duration
+    web_server:
+      sorting_group_id: sg_power
+      sorting_weight: 32
     min_value: 1
     max_value: 1440
     step: 1
@@ -815,6 +942,9 @@ switch:
     pin: GPIO7
     name: "Accessory Power"
     id: accessory_power
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 99
     restore_mode: ALWAYS_ON
     setup_priority: 1100
     entity_category: "diagnostic"
@@ -825,6 +955,9 @@ switch:
   - platform: template
     name: "Buzzer Enabled"
     id: buzzer_enabled
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 64
     icon: mdi:bell-ring
     restore_mode: RESTORE_DEFAULT_ON
     optimistic: true
@@ -835,6 +968,9 @@ switch:
   - platform: template
     name: "Battery LED on Wake"
     id: battery_led_on_wake
+    web_server:
+      sorting_group_id: sg_power
+      sorting_weight: 37
     icon: mdi:led-on
     restore_mode: RESTORE_DEFAULT_OFF
     optimistic: true
@@ -846,6 +982,9 @@ switch:
   - platform: template
     name: "Use Static IP"
     id: use_static_ip
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 49
     icon: mdi:ip-network
     restore_mode: RESTORE_DEFAULT_OFF
     optimistic: true
@@ -873,6 +1012,9 @@ switch:
   - platform: template
     name: "Verbose Logging"
     id: verbose_logging
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 68
     icon: mdi:console-line
     restore_mode: ALWAYS_ON
     optimistic: true
@@ -1821,6 +1963,9 @@ select:
   - platform: template
     name: "Power Source"
     id: power_source
+    web_server:
+      sorting_group_id: sg_power
+      sorting_weight: 31
     icon: mdi:power-plug
     entity_category: "config"
     optimistic: true
@@ -1842,6 +1987,9 @@ select:
   - platform: template
     name: "Column ID"
     id: column_id
+    web_server:
+      sorting_group_id: sg_identity
+      sorting_weight: 51
     icon: mdi:tag-text
     entity_category: "config"
     optimistic: true
@@ -2180,6 +2328,9 @@ text:
   - platform: template
     name: "Custom Column ID"
     id: custom_column_id
+    web_server:
+      sorting_group_id: sg_identity
+      sorting_weight: 52
     icon: mdi:form-textbox
     entity_category: "config"
     optimistic: true
@@ -2194,6 +2345,9 @@ text:
   - platform: template
     name: "MQTT Broker"
     id: mqtt_broker_override
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 41
     icon: mdi:server-network
     entity_category: "config"
     optimistic: true
@@ -2214,6 +2368,9 @@ text:
   - platform: template
     name: "MQTT Topic Prefix"
     id: mqtt_topic_prefix_override
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 45
     icon: mdi:tag-text
     entity_category: "config"
     optimistic: true
@@ -2226,6 +2383,9 @@ text:
   - platform: template
     name: "MQTT Username"
     id: mqtt_username_override
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 43
     icon: mdi:account
     entity_category: "config"
     optimistic: true
@@ -2239,6 +2399,9 @@ text:
   - platform: template
     name: "MQTT Password"
     id: mqtt_password_override
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 44
     icon: mdi:lock
     entity_category: "config"
     optimistic: true
@@ -2252,6 +2415,9 @@ text:
   - platform: template
     name: "Web Auth Username"
     id: web_auth_username_override
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 47
     icon: mdi:account-key
     entity_category: "config"
     optimistic: true
@@ -2267,6 +2433,9 @@ text:
   - platform: template
     name: "Web Auth Password"
     id: web_auth_password_override
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 48
     icon: mdi:lock-question
     entity_category: "config"
     optimistic: true
@@ -2281,6 +2450,9 @@ text:
   - platform: template
     name: "Deployment Notes"
     id: deployment_notes
+    web_server:
+      sorting_group_id: sg_identity
+      sorting_weight: 53
     icon: mdi:note-text
     entity_category: "config"
     optimistic: true
@@ -2295,6 +2467,9 @@ text:
   - platform: template
     name: "Static IP"
     id: static_ip
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 50
     icon: mdi:ip-network
     entity_category: "config"
     optimistic: true
@@ -2307,6 +2482,9 @@ text:
   - platform: template
     name: "Static Gateway"
     id: static_gateway
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 51
     icon: mdi:router-network
     entity_category: "config"
     optimistic: true
@@ -2319,6 +2497,9 @@ text:
   - platform: template
     name: "Static Subnet"
     id: static_subnet
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 52
     icon: mdi:ip-network-outline
     entity_category: "config"
     optimistic: true
@@ -2338,6 +2519,9 @@ text:
   - platform: template
     name: "Static DNS 1"
     id: static_dns1
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 53
     icon: mdi:dns
     entity_category: "config"
     optimistic: true
@@ -2350,6 +2534,9 @@ text:
   - platform: template
     name: "Static DNS 2"
     id: static_dns2
+    web_server:
+      sorting_group_id: sg_network
+      sorting_weight: 54
     icon: mdi:dns-outline
     entity_category: "config"
     optimistic: true
@@ -2381,6 +2568,9 @@ text_sensor:
   - platform: template
     name: "Wake Reason"
     id: wake_reason_sensor
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 71
     icon: mdi:power-on
     entity_category: diagnostic
     update_interval: 30s
@@ -2396,6 +2586,9 @@ text_sensor:
   - platform: template
     name: "Health Status"
     id: health_status_sensor
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 70
     icon: mdi:heart-pulse
     entity_category: diagnostic
     update_interval: 30s
@@ -2420,6 +2613,9 @@ text_sensor:
   - platform: template
     name: "Uptime"
     id: uptime_text
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 72
     icon: mdi:timer-outline
     entity_category: "diagnostic"
     update_interval: 10s
@@ -2441,6 +2637,9 @@ text_sensor:
   - platform: template
     name: "Device ID"
     id: device_mac_address
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 73
     entity_category: "diagnostic"
     lambda: |-
       // Portable across ETH and WiFi variants — no need for esp_mac.h.
@@ -2451,6 +2650,9 @@ text_sensor:
   - platform: template
     name: "IP Address"
     id: device_ip_address
+    web_server:
+      sorting_group_id: sg_diag
+      sorting_weight: 74
     icon: mdi:ip-network
     entity_category: "diagnostic"
     lambda: |-

@@ -100,6 +100,9 @@ esp32:
   board: esp32-s3-devkitc-1
   variant: esp32s3
   flash_size: 8MB
+  # Explicit clock pin — ESPHome 2026.4.0 flips the S3 default to 240 MHz;
+  # the raw sdkconfig line alone would then be silently overridden.
+  cpu_frequency: 160MHZ
   framework:
     type: esp-idf
     sdkconfig_options:
@@ -117,7 +120,7 @@ dashboard_import:
   import_full_config: false
 
 external_components:
-  - source: github://ApolloAutomation/esphome-battery-component
+  - source: github://ApolloAutomation/esphome-battery-component@2f24e89a2a4bb02cda63ab074585904cd58247c4
     components: [max17048]
 
 # ------------------------------------------------------------------ globals
@@ -246,6 +249,8 @@ mdns:
 web_server:
   port: 80
   version: 3
+  # Serve the UI from flash (no oi.esphome.io dependency) — see Core_MQTT.yaml.
+  local: true
   include_internal: false
   # Same basic-auth pair as the MQTT family (secrets.yaml). Without this the
   # rig exposed unauthenticated web OTA and factory reset on the plant subnet

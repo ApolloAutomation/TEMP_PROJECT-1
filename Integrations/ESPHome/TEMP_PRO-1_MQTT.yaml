@@ -927,12 +927,18 @@ button:
     icon: mdi:power-cycle
     name: "ESP Reboot"
     id: esp_reboot
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 61
 
   # Diagnostic: end the current wake immediately and enter deep sleep.
   # Flips power_source to "battery" first so wired devices honor it too.
   - platform: template
     name: "Force Sleep"
     id: button_force_sleep
+    web_server:
+      sorting_group_id: sg_power
+      sorting_weight: 38
     icon: mdi:power-sleep
     entity_category: "diagnostic"
     on_press:
@@ -949,6 +955,9 @@ button:
   - platform: template
     name: "Publish Now"
     id: button_publish_now
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 62
     icon: mdi:publish
     entity_category: "diagnostic"
     on_press:

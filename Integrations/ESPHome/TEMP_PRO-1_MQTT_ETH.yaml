@@ -916,12 +916,18 @@ button:
     icon: mdi:power-cycle
     name: "ESP Reboot"
     id: esp_reboot
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 61
 
   # Diagnostic: force an MQTT publish now without waiting for the next wake cycle.
   # Useful for remote verification that the device is healthy and producing data.
   - platform: template
     name: "Publish Now"
     id: button_publish_now
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 62
     icon: mdi:upload
     entity_category: "diagnostic"
     on_press:
@@ -933,6 +939,9 @@ button:
   - platform: template
     name: "Force Sleep"
     id: button_force_sleep
+    web_server:
+      sorting_group_id: sg_power
+      sorting_weight: 38
     icon: mdi:power-sleep
     entity_category: "diagnostic"
     on_press:
@@ -950,6 +959,9 @@ button:
   - platform: template
     name: "Clean SEN55 Fan"
     id: button_clean_sen55
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 63
     icon: mdi:fan-clock
     entity_category: "diagnostic"
     on_press:
@@ -961,6 +973,9 @@ button:
   - platform: template
     name: "Test Buzzer"
     id: button_test_buzzer
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 66
     icon: mdi:volume-high
     entity_category: "diagnostic"
     on_press:
@@ -978,6 +993,9 @@ button:
   - platform: template
     name: "Stop Buzzer"
     id: button_stop_buzzer
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 67
     icon: mdi:volume-off
     entity_category: "diagnostic"
     on_press:
@@ -989,6 +1007,9 @@ button:
   - platform: template
     name: "Restart SEN55"
     id: button_restart_sen55
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 69
     icon: mdi:restart
     entity_category: "diagnostic"
     on_press:
@@ -1017,6 +1038,9 @@ button:
   - platform: template
     name: "Test LED"
     id: button_test_led
+    web_server:
+      sorting_group_id: sg_maintenance
+      sorting_weight: 71
     icon: mdi:led-variant-outline
     entity_category: "diagnostic"
     on_press:
