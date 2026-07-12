@@ -23,14 +23,37 @@ jobs:
         file:
           - Integrations/ESPHome/TEMP_PRO-1_ETH.yaml
           - Integrations/ESPHome/TEMP_PRO-1_W.yaml
+          - Integrations/ESPHome/TEMP_PRO-1_MQTT.yaml
+          - Integrations/ESPHome/TEMP_PRO-1_MQTT_ETH.yaml
+          - Integrations/ESPHome/TEMP_PRO-1_W_BATTERY.yaml
         esphome-version:
           - stable
           - beta
           - dev
+        # The MQTT pair is the firmware deployed in the field; also build it
+        # with the exact toolchain version currently used to flash the fleet.
+        include:
+          - file: Integrations/ESPHome/TEMP_PRO-1_MQTT.yaml
+            esphome-version: 2026.3.1
+          - file: Integrations/ESPHome/TEMP_PRO-1_MQTT_ETH.yaml
+            esphome-version: 2026.3.1
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4.2.2
+      # secrets.yaml is gitignored; the MQTT variants resolve !secret values
+      # from it at config time. Placeholders only — never real site values.
+      - name: Create CI secrets file
+        run: |
+          cat > Integrations/ESPHome/secrets.yaml <<'EOF'
+          mqtt_broker: "127.0.0.1"
+          mqtt_port: 1883
+          mqtt_username: "ci"
+          mqtt_password: "ci"
+          web_auth_username: "admin"
+          web_auth_password: "ci-placeholder"
+          EOF
       - name: Build ESPHome firmware to verify configuration
         uses: esphome/build-action@v7
         with:
           yaml-file: ${{ matrix.file }}
+          version: ${{ matrix.esphome-version }}
