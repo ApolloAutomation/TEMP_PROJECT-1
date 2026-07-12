@@ -373,11 +373,24 @@ sensor:
       accuracy_decimals: 1
       unit_of_measurement: "°F"
       filters:
-        - lambda: 'return x * 9.0 / 5.0 + 32.0;'
+        # C-to-F, then the per-unit calibration offset. NaN passes through
+        # untouched so failure detection keeps working.
+        - lambda: |-
+            if (std::isnan(x)) return x;
+            return x * 9.0 / 5.0 + 32.0 + id(sht_temp_offset_f).state;
     humidity:
       name: "Relative Humidity"
       id: sht_humidity
       accuracy_decimals: 1
+      filters:
+        # Per-unit calibration offset, clamped to the physical 0-100 % range.
+        # NaN passes through untouched for failure detection.
+        - lambda: |-
+            if (std::isnan(x)) return x;
+            float v = x + id(sht_hum_offset).state;
+            if (v < 0.0f) return 0.0f;
+            if (v > 100.0f) return 100.0f;
+            return v;
     update_interval: 10s
 
   # PM mass concentration ranges (what's actually in each size bucket).
@@ -672,6 +685,59 @@ number:
     entity_category: CONFIG
     unit_of_measurement: "s"
 
+  # Per-unit SHT3x calibration against a reference instrument, applied in the
+  # sensor filter chain (temperature offset is in °F, after the C-to-F
+  # conversion). 0 = no correction. Survives reboots and power cuts.
+  - platform: template
+    name: "SHT Temperature Offset"
+    id: sht_temp_offset_f
+    min_value: -10
+    max_value: 10
+    step: 0.1
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:thermometer-plus"
+    entity_category: CONFIG
+    unit_of_measurement: "°F"
+
+  - platform: template
+    name: "SHT Humidity Offset"
+    id: sht_hum_offset
+    min_value: -20
+    max_value: 20
+    step: 0.5
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    icon: "mdi:water-percent"
+    entity_category: CONFIG
+    unit_of_measurement: "%"
+
+  # Buzzer loudness (rtttl gain). The NVS-restored value re-fires on_value
+  # during setup, so it also applies after reboots and power cuts.
+  - platform: template
+    name: "Buzzer Volume"
+    id: buzzer_volume_pct
+    min_value: 0
+    max_value: 100
+    step: 5
+    mode: box
+    update_interval: never
+    optimistic: true
+    restore_value: true
+    initial_value: 60
+    icon: "mdi:volume-high"
+    entity_category: CONFIG
+    unit_of_measurement: "%"
+    on_value:
+      then:
+        - lambda: 'id(rtttl_buzzer).set_gain(x / 100.0f);'
+
   # Warm-up delay before sampling SEN55 (seconds from boot).
   # 20s is the SEN55 datasheet minimum for valid PM readings — was the
   # pre-May-2 default and ran for months at TMMK with usable data.
@@ -752,6 +818,17 @@ switch:
     restore_mode: ALWAYS_ON
     setup_priority: 1100
     entity_category: "diagnostic"
+
+  # Master buzzer enable. OFF silences the MQTT buzzer command and the Test
+  # Buzzer button without needing broker-side changes — a rogue or retained
+  # buzzer payload cannot make noise on the floor while this is off.
+  - platform: template
+    name: "Buzzer Enabled"
+    id: buzzer_enabled
+    icon: mdi:bell-ring
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    entity_category: "config"
 
   # Show battery level LED on every wake (even unattended cycles).
   # Default OFF to save battery; turn ON as an always-on indicator for techs.
@@ -1020,6 +1097,51 @@ script:
             pub_total++;
             if (!id(mqtt_client).publish(t, p, len, q, retain)) pub_fail++;
           };
+
+          // Tombstone the retained values at the PREVIOUS prefix when the
+          // column ID / custom ID / prefix override changed. Otherwise the
+          // broker keeps a ghost device with plausible, frozen readings at
+          // the old prefix forever — the worst kind of silent failure for a
+          // SCADA consumer. Runs once per change, only while connected
+          // (offline tombstones would be silently dropped and the change
+          // marker must not advance until they actually went out).
+          if (id(mqtt_client).is_connected()) {
+            std::string old_prefix = id(last_published_prefix).state;
+            if (old_prefix != std::string(prefix)) {
+              if (!old_prefix.empty()) {
+                static const char *const TOPIC_SUFFIXES[] = {
+                  "sensor/pm_0_3_to_1", "sensor/pm_1_to_2_5", "sensor/pm_2_5_to_4",
+                  "sensor/pm_4_to_10", "sensor/pm_total", "sensor/battery_level",
+                  "sensor/temperature", "sensor/humidity",
+                  "meta/device_id", "meta/device_name", "meta/ip_address",
+                  "meta/unit_pm", "meta/unit_battery", "meta/unit_temperature",
+                  "meta/unit_humidity", "meta/sleep_mode", "meta/power_source",
+                  "meta/wake_reason", "meta/sen55_fail_count", "meta/sht_fail_count",
+                  "meta/max17048_fail_count", "meta/lifetime_min_battery_pct",
+                  "meta/lifetime_max_battery_pct", "meta/lifetime_min_battery_v",
+                  "meta/lifetime_max_battery_v", "meta/config_sleep_duration_min",
+                  "meta/config_max_wake_time_s", "meta/config_critical_battery_threshold_pct",
+                  "meta/config_critical_battery_sleep_min", "meta/config_warmup_delay_s",
+                  "meta/config_publish_interval_s", "meta/firmware_version",
+                  "meta/boot_count", "meta/wake_duration_s", "meta/battery_voltage",
+                  "meta/free_heap_kb", "meta/deployment_notes", "meta/sen55_serial",
+                  "meta/sen55_firmware", "status/sensors_skipped",
+                  "status/critical_battery", "status/health", "status/sen55_errors",
+                };
+                char old_topic[192];
+                for (auto *sfx : TOPIC_SUFFIXES) {
+                  snprintf(old_topic, sizeof(old_topic), "%s/%s", old_prefix.c_str(), sfx);
+                  id(mqtt_client).publish(old_topic, "", 0, 0, true);
+                }
+                ESP_LOGW("Apollo", "Prefix changed '%s' -> '%s' — tombstoned %d retained topics at the old prefix",
+                         old_prefix.c_str(), prefix,
+                         (int) (sizeof(TOPIC_SUFFIXES) / sizeof(TOPIC_SUFFIXES[0])));
+              }
+              auto call = id(last_published_prefix).make_call();
+              call.set_value(prefix);
+              call.perform();
+            }
+          }
 
           // Publish sensor values - topic is the key, payload is the value
           char topic[128];
@@ -2206,6 +2328,13 @@ text:
     max_length: 15
     mode: text
 
+  # DNS deliberately defaults to EMPTY (= leave the interface's DNS alone).
+  # The old 8.8.8.8/8.8.4.4 defaults were a trap on restricted corporate
+  # networks: public DNS is firewalled and cannot resolve an internal broker
+  # FQDN, so enabling static IP silently killed MQTT. Set the site's DNS
+  # servers here, or set the MQTT Broker override to an IP literal.
+  # (initial_value only affects fresh/factory-reset devices; units that
+  # already stored a value keep it.)
   - platform: template
     name: "Static DNS 1"
     id: static_dns1
@@ -2213,7 +2342,7 @@ text:
     entity_category: "config"
     optimistic: true
     restore_value: true
-    initial_value: "8.8.8.8"
+    initial_value: ""
     min_length: 0
     max_length: 15
     mode: text
@@ -2225,9 +2354,24 @@ text:
     entity_category: "config"
     optimistic: true
     restore_value: true
-    initial_value: "8.8.4.4"
+    initial_value: ""
     min_length: 0
     max_length: 15
+    mode: text
+
+  # Internal (hidden from the UI): the "<root>-<suffix>" prefix of the last
+  # successful publish, so a column/prefix change can tombstone the retained
+  # values at the OLD prefix. Without this, renaming a device leaves a ghost
+  # device with plausible frozen readings at the broker forever.
+  - platform: template
+    name: "Last Published Prefix"
+    id: last_published_prefix
+    internal: true
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    min_length: 0
+    max_length: 128
     mode: text
 
 text_sensor:

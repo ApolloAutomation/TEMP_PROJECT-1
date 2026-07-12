@@ -53,15 +53,36 @@ esphome:
     - priority: 700
       then:
         - lambda: |-
-            // ----- MQTT credentials -----
-            if (!id(mqtt_broker_override).state.empty()) {
-              id(mqtt_client)->set_broker_address(id(mqtt_broker_override).state);
-              ESP_LOGW("Apollo", "MQTT broker override: %s", id(mqtt_broker_override).state.c_str());
+            // ----- MQTT broker override (with N-strikes fallback) -----
+            // Strike counter: incremented here when a broker/port override is
+            // active, cleared on any successful MQTT connect. After 5
+            // consecutive override-active boots without a connect, alternate
+            // boots fall back to the compile-time !secret broker so one bad
+            // (possibly fleet-broadcast) value can no longer permanently
+            // orphan a device — reboot_timeout is 0s by design, so nothing
+            // else would ever recover it. The override text is never erased.
+            bool have_broker_override = !id(mqtt_broker_override).state.empty() ||
+                                        id(mqtt_port_override).state > 0;
+            bool use_broker_override = have_broker_override;
+            if (have_broker_override) {
+              id(mqtt_override_fail_count) += 1;
+              if (id(mqtt_override_fail_count) > 5 &&
+                  (id(mqtt_override_fail_count) % 2 == 0)) {
+                use_broker_override = false;
+                ESP_LOGE("Apollo", "MQTT override unconnected for %u consecutive boots — using compile-time broker THIS boot (override kept)",
+                         (unsigned) (id(mqtt_override_fail_count) - 1));
+              }
             }
-            if (id(mqtt_port_override).state > 0) {
-              uint16_t p = (uint16_t)id(mqtt_port_override).state;
-              id(mqtt_client)->set_broker_port(p);
-              ESP_LOGW("Apollo", "MQTT port override: %u", p);
+            if (use_broker_override) {
+              if (!id(mqtt_broker_override).state.empty()) {
+                id(mqtt_client)->set_broker_address(id(mqtt_broker_override).state);
+                ESP_LOGW("Apollo", "MQTT broker override: %s", id(mqtt_broker_override).state.c_str());
+              }
+              if (id(mqtt_port_override).state > 0) {
+                uint16_t p = (uint16_t) id(mqtt_port_override).state;
+                id(mqtt_client)->set_broker_port(p);
+                ESP_LOGW("Apollo", "MQTT port override: %u", p);
+              }
             }
             if (!id(mqtt_username_override).state.empty()) {
               id(mqtt_client)->set_username(id(mqtt_username_override).state);
@@ -145,6 +166,12 @@ esphome:
                            id(static_ip).state.c_str(),
                            id(static_gateway).state.c_str(),
                            id(static_subnet).state.c_str());
+
+                  if (id(static_dns1).state.empty() && id(static_dns2).state.empty()) {
+                    ESP_LOGE("Apollo", "Static IP has NO DNS servers configured — a hostname broker will NOT resolve. Set the site's DNS servers, or set the MQTT Broker override to an IP literal.");
+                  } else if (id(static_dns1).state == "8.8.8.8" || id(static_dns2).state == "8.8.4.4") {
+                    ESP_LOGW("Apollo", "Static DNS is public Google DNS — usually firewalled on restricted networks, and it cannot resolve internal broker FQDNs.");
+                  }
     - priority: -100
       then:
         - lambda: |-
@@ -297,7 +324,10 @@ mqtt:
       # Stamp connect time — apply_power_mode_command (Core_MQTT.yaml) uses
       # this to reject stale retained "battery" commands replayed by the
       # broker right after subscribe.
-      - lambda: 'id(mqtt_connected_at_ms) = millis() ? millis() : 1;'
+      - lambda: |-
+          id(mqtt_connected_at_ms) = millis() ? millis() : 1;
+          // Broker reached — clear the broker-override strike counter.
+          if (id(mqtt_override_fail_count) != 0) id(mqtt_override_fail_count) = 0;
       # Boot-loop cooldown: if check_boot_loop set this flag in on_boot, skip
       # everything and head straight to sleep. The 30-min sleep gives whatever
       # is causing the loop a chance to clear (e.g. transient hardware glitch,
@@ -629,6 +659,11 @@ mqtt:
     - topic: apollo/temp-pro-1/command/buzzer
       then:
         - lambda: |-
+            if (x.empty()) return;
+            if (!id(buzzer_enabled).state) {
+              ESP_LOGW("Apollo", "Buzzer command ignored — Buzzer Enabled is OFF");
+              return;
+            }
             std::string sound = x;
             if (sound == "beep") {
               id(rtttl_buzzer).play("beep:d=4,o=5,b=100:c");
@@ -804,6 +839,53 @@ mqtt:
             call.perform();
             ESP_LOGW("Apollo", "Web auth password set via MQTT (reboot to apply) — verify before reboot to avoid lockout");
 
+    # Critical-battery tuning (validated numeric; persisted to NVS)
+    - topic: apollo/temp-pro-1/command/critical_battery_threshold
+      then:
+        - lambda: |-
+            char *end = nullptr;
+            float v = strtof(x.c_str(), &end);
+            if (end == x.c_str() || x.empty()) {
+              ESP_LOGW("Apollo", "Ignoring non-numeric critical_battery_threshold: '%s'", x.c_str());
+            } else if (v >= 0 && v <= 50) {
+              auto call = id(critical_battery_threshold_pct).make_call();
+              call.set_value(v);
+              call.perform();
+              ESP_LOGI("Apollo", "Critical battery threshold set to %.0f %%", v);
+            } else {
+              ESP_LOGW("Apollo", "Invalid critical_battery_threshold: %.2f (must be 0-50)", v);
+            }
+
+    - topic: apollo/temp-pro-1/command/critical_battery_sleep
+      then:
+        - lambda: |-
+            char *end = nullptr;
+            float v = strtof(x.c_str(), &end);
+            if (end == x.c_str() || x.empty()) {
+              ESP_LOGW("Apollo", "Ignoring non-numeric critical_battery_sleep: '%s'", x.c_str());
+            } else if (v >= 5 && v <= 1440) {
+              auto call = id(critical_battery_sleep_min).make_call();
+              call.set_value(v);
+              call.perform();
+              ESP_LOGI("Apollo", "Critical battery sleep set to %.0f min", v);
+            } else {
+              ESP_LOGW("Apollo", "Invalid critical_battery_sleep: %.2f (must be 5-1440)", v);
+            }
+
+    # Immediate publish for wired devices. Battery devices publish every wake
+    # anyway, and honoring a retained replay would double-publish every wake
+    # (the 2026-05-14 wake-budget incident class), so battery mode ignores it.
+    - topic: apollo/temp-pro-1/command/publish_now
+      then:
+        - if:
+            condition:
+              and:
+                - lambda: 'return !x.empty();'
+                - lambda: 'return id(power_source).current_option() == "wired";'
+            then:
+              - lambda: 'ESP_LOGW("Apollo", "Publish Now triggered via MQTT");'
+              - script.execute: publish_mqtt_data
+
 script:
   - id: statusCheck
     then:
@@ -882,9 +964,15 @@ button:
     icon: mdi:volume-high
     entity_category: "diagnostic"
     on_press:
-      - lambda: 'ESP_LOGW("Apollo", "Buzzer test triggered via web UI");'
-      - rtttl.play:
-          rtttl: "success:d=4,o=5,b=100:c,e,g"
+      - if:
+          condition:
+            switch.is_on: buzzer_enabled
+          then:
+            - lambda: 'ESP_LOGW("Apollo", "Buzzer test triggered via web UI");'
+            - rtttl.play:
+                rtttl: "success:d=4,o=5,b=100:c,e,g"
+          else:
+            - lambda: 'ESP_LOGW("Apollo", "Buzzer test ignored — Buzzer Enabled is OFF");'
 
   # Stop any currently playing buzzer tone.
   - platform: template
