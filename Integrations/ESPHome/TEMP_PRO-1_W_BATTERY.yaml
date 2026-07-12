@@ -24,7 +24,7 @@
 # ============================================================================
 
 substitutions:
-  version: "26.1.21.1-w-bat"
+  version: "26.7.12.1-w-bat"
   device_description: TEMP_PRO-1 W BATTERY made by Apollo Automation - version ${version}.
 
 esphome:
