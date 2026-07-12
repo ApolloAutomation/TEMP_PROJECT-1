@@ -12,6 +12,46 @@ esphome:
 
   min_version: 2025.2.0
 
+  # ---------------------------------------------------------------------------
+  # Battery fix (ported from the mqtt_toy branch). The GPIO7 "accessory rail"
+  # powers the W5500 ethernet PHY and the I2C sensors. On stock firmware that
+  # rail stays energized through deep sleep (~7mA), which is the dominant
+  # battery drain on this hardware. Here we cut it during sleep and hold the
+  # pin LOW so it can't float back on.
+  #
+  # The HA-API sleep/wake cycle in Core.yaml is left completely untouched:
+  # accessory_power is still switched on in api.on_client_connected, values
+  # are reported, and deep_sleep.enter runs exactly as before. These two
+  # handlers only bracket that cycle — cut power on the way down, release the
+  # hold on the way up.
+  # ---------------------------------------------------------------------------
+  on_shutdown:
+    # Priority 300 runs AFTER ESPHome's ethernet teardown (priority 250), so
+    # the W5500 PHY is shut down gracefully while it still has power. Cutting
+    # the rail before teardown caused a watchdog hang on the mqtt_toy branch.
+    - priority: 300
+      then:
+        - lambda: |-
+            gpio_set_direction(GPIO_NUM_7, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_7, 0);
+            gpio_hold_en(GPIO_NUM_7);
+            gpio_deep_sleep_hold_en();
+            ESP_LOGW("Apollo", "on_shutdown: accessory power OFF, GPIO7 held LOW for deep sleep");
+  on_boot:
+    # Priority 1200 runs very early — before the accessory_power switch (setup
+    # priority 1100) and sensor setup — so releasing the hold lets the rail be
+    # driven normally for this wake. No-op on a cold/first boot.
+    - priority: 1200
+      then:
+        - lambda: |-
+            gpio_hold_dis(GPIO_NUM_7);
+            esp_sleep_wakeup_cause_t wc = esp_sleep_get_wakeup_cause();
+            const char *cause;
+            if (wc == ESP_SLEEP_WAKEUP_TIMER)     cause = "deep sleep timer";
+            else if (wc == ESP_SLEEP_WAKEUP_EXT0) cause = "button press";
+            else                                  cause = "power-on / other";
+            ESP_LOGW("Apollo", "Wake cause: %s — GPIO7 hold released", cause);
+
 dashboard_import:
   package_import_url: github://ApolloAutomation/TEMP_PROJECT-1/Integrations/ESPHome/TEMP_PRO-1_ETH.yaml
   import_full_config: false
