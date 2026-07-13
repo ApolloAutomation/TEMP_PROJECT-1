@@ -19,8 +19,22 @@ dashboard_import:
 ota:
   - platform: esphome
     id: ota_esphome
+    on_error:
+      then:
+        - lambda: |-
+            id(last_ota_error_code) = x;
+            char buf[24];
+            snprintf(buf, sizeof(buf), "Error %d", x);
+            id(last_ota_error).publish_state(buf);
   - platform: http_request
     id: ota_managed
+    on_error:
+      then:
+        - lambda: |-
+            id(last_ota_error_code) = x;
+            char buf[24];
+            snprintf(buf, sizeof(buf), "Error %d", x);
+            id(last_ota_error).publish_state(buf);
 
 http_request:
   verify_ssl: true

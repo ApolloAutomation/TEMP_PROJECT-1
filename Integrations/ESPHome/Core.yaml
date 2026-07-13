@@ -55,6 +55,13 @@ esphome:
             }
             id(crash_count_sensor).publish_state(id(crash_count));
             id(firmware_version).publish_state("${version}");
+            if (id(last_ota_error_code) >= 0) {
+              char buf[24];
+              snprintf(buf, sizeof(buf), "Error %d", id(last_ota_error_code));
+              id(last_ota_error).publish_state(buf);
+            } else {
+              id(last_ota_error).publish_state("None");
+            }
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -175,6 +182,10 @@ globals:
     type: int
     restore_value: yes
     initial_value: '0'
+  - id: last_ota_error_code
+    type: int
+    restore_value: yes
+    initial_value: '-1'
 
 i2c:
   sda: GPIO16
@@ -1448,6 +1459,16 @@ text_sensor:
     name: "Wake Cause"
     id: wake_cause
     icon: "mdi:sleep-off"
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: never
+
+  # Written by the ota on_error hooks in the variant files; survives reboot.
+  # OTA failures and safe-mode rollbacks were previously invisible from HA.
+  - platform: template
+    name: "Last OTA Error"
+    id: last_ota_error
+    icon: "mdi:update-alert"
     entity_category: diagnostic
     disabled_by_default: true
     update_interval: never
