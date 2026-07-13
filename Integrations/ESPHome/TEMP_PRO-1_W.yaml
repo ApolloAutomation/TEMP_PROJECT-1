@@ -41,6 +41,39 @@ wifi:
 
 captive_portal:
 
+# WiFi diagnostics: RSSI/BSSID history is the only remote way to tell weak
+# signal from AP roaming from DHCP churn on a unit that drops off HA.
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_dbm
+    update_interval: 60s
+    entity_category: diagnostic
+    disabled_by_default: true
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "WiFi IP Address"
+      id: wifi_ip_address
+      entity_category: diagnostic
+      disabled_by_default: true
+    ssid:
+      name: "WiFi SSID"
+      id: wifi_connected_ssid
+      entity_category: diagnostic
+      disabled_by_default: true
+    bssid:
+      name: "WiFi BSSID"
+      id: wifi_connected_bssid
+      entity_category: diagnostic
+      disabled_by_default: true
+    mac_address:
+      name: "WiFi MAC Address"
+      id: wifi_mac_address
+      entity_category: diagnostic
+      disabled_by_default: true
+
 script:
   - id: statusCheck
     then:

@@ -88,5 +88,20 @@ select:
               - component.update: update_http_request
 
 
+# Ethernet diagnostics: commercial installs run cross-subnet where mDNS is
+# often blocked; the raw IP is the only usable handle for the web UI.
+text_sensor:
+  - platform: ethernet_info
+    ip_address:
+      name: "Ethernet IP Address"
+      id: ethernet_ip_address
+      entity_category: diagnostic
+      disabled_by_default: true
+    mac_address:
+      name: "Ethernet MAC Address"
+      id: ethernet_mac_address
+      entity_category: diagnostic
+      disabled_by_default: true
+
 packages:
   core: !include Core.yaml
