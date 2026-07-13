@@ -42,8 +42,8 @@ external_components:
     components: [max17048]
 
 api:
-  services:
-    - service: play_buzzer
+  actions:
+    - action: play_buzzer
       variables:
         song_str: string
       then:
