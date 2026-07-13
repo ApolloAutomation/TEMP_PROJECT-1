@@ -4,6 +4,8 @@ substitutions:
 
 esphome:
   name: temp-pro-1
+  includes:
+    - <esp_system.h>
   on_boot:
     - priority: -100
       then:
@@ -25,6 +27,34 @@ esphome:
             id(sht_humidity).publish_state(id(sht_humidity_raw).state);
             id(last_temp_update) = millis();
             id(last_humidity_update) = millis();
+    - priority: -100
+      then:
+        - lambda: |-
+            // Boot diagnostics: wake cause, crash counter, firmware version.
+            // Additive only; touches no existing entity.
+            switch (esp_sleep_get_wakeup_cause()) {
+              case ESP_SLEEP_WAKEUP_TIMER:
+                id(wake_cause).publish_state("Timer");
+                break;
+              case ESP_SLEEP_WAKEUP_EXT0:
+              case ESP_SLEEP_WAKEUP_EXT1:
+              case ESP_SLEEP_WAKEUP_GPIO:
+                id(wake_cause).publish_state("GPIO");
+                break;
+              case ESP_SLEEP_WAKEUP_UNDEFINED:
+                id(wake_cause).publish_state("Power-on/Reset");
+                break;
+              default:
+                id(wake_cause).publish_state("Other");
+                break;
+            }
+            const esp_reset_reason_t r = esp_reset_reason();
+            if (r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT ||
+                r == ESP_RST_WDT || r == ESP_RST_BROWNOUT) {
+              id(crash_count) += 1;
+            }
+            id(crash_count_sensor).publish_state(id(crash_count));
+            id(firmware_version).publish_state("${version}");
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -141,6 +171,10 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  - id: crash_count
+    type: int
+    restore_value: yes
+    initial_value: '0'
 
 i2c:
   sda: GPIO16
@@ -149,6 +183,9 @@ i2c:
 
 web_server:
   port: 80
+
+debug:
+  update_interval: 60s
 
 deep_sleep:
   id: deep_sleep_1
@@ -272,6 +309,32 @@ binary_sensor:
               - delay: 2s
               - deep_sleep.enter:
                   id: deep_sleep_1
+
+  # Sensor-health diagnostics. A failed sensor otherwise freezes at its last
+  # value and keeps republishing it, indistinguishable from a healthy one.
+  - platform: template
+    name: "SHT30 Sensor Fault"
+    id: sht30_sensor_fault
+    device_class: problem
+    entity_category: diagnostic
+    disabled_by_default: true
+    lambda: 'return id(sht3xd_sensor).status_has_warning() || id(sht3xd_sensor).is_failed();'
+
+  - platform: template
+    name: "SEN55 Sensor Fault"
+    id: sen55_sensor_fault
+    device_class: problem
+    entity_category: diagnostic
+    disabled_by_default: true
+    lambda: 'return id(sen55).status_has_warning() || id(sen55).is_failed();'
+
+  - platform: template
+    name: "Temperature Probe Connected"
+    id: dallas_probe_connected
+    device_class: connectivity
+    entity_category: diagnostic
+    disabled_by_default: true
+    lambda: 'return id(dallas_temp_probe).has_state() && !std::isnan(id(dallas_temp_probe).state);'
 
   - platform: homeassistant
     name: "OTA Mode"
@@ -782,6 +845,35 @@ sensor:
             if (x > 100) return 100;
             else return (x);
 
+  # Runtime health diagnostics
+  - platform: debug
+    free:
+      name: "Heap Free"
+      id: debug_heap_free
+      entity_category: diagnostic
+      disabled_by_default: true
+    block:
+      name: "Heap Max Block"
+      id: debug_heap_block
+      entity_category: diagnostic
+      disabled_by_default: true
+    loop_time:
+      name: "Loop Time"
+      id: debug_loop_time
+      entity_category: diagnostic
+      disabled_by_default: true
+
+  # Persisted count of crash-type resets (panic/watchdog/brownout). Uptime
+  # cannot reveal crashes on units that reboot every deep-sleep wake.
+  - platform: template
+    name: "Crash Count"
+    id: crash_count_sensor
+    icon: "mdi:alert-circle-outline"
+    entity_category: diagnostic
+    disabled_by_default: true
+    accuracy_decimals: 0
+    update_interval: never
+
 light:
   - platform: esp32_rmt_led_strip
     id: rgb_light
@@ -823,6 +915,14 @@ button:
     disabled_by_default: True
     name: "Factory Reset ESP"
     id: factory_reset_all
+
+  # Remote rescue: reboot into safe mode (network + OTA only). The only other
+  # remote levers are a plain reboot or a provisioning-destroying factory reset.
+  - platform: safe_mode
+    name: "Safe Mode Boot"
+    id: safe_mode_boot
+    entity_category: diagnostic
+    disabled_by_default: true
 
   - platform: ld2412
     factory_reset:
@@ -1321,3 +1421,33 @@ text_sensor:
     id: ota_url
     entity_category: "diagnostic"
     internal: true
+
+  # Boot / identity diagnostics (published from on_boot; see esphome: block)
+  - platform: debug
+    reset_reason:
+      name: "Reset Reason"
+      id: debug_reset_reason
+      entity_category: diagnostic
+      disabled_by_default: true
+
+  - platform: version
+    name: "ESPHome Version"
+    id: sys_esphome_version
+    entity_category: diagnostic
+    disabled_by_default: true
+
+  - platform: template
+    name: "Firmware Version"
+    id: firmware_version
+    icon: "mdi:package-up"
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: never
+
+  - platform: template
+    name: "Wake Cause"
+    id: wake_cause
+    icon: "mdi:sleep-off"
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: never
