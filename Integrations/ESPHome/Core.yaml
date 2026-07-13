@@ -142,10 +142,14 @@ api:
                 if (id(alarm_triggered_on_wake)) {
                   ESP_LOGW("Apollo", "Alarm Active - Staying Awake");
                   id(deep_sleep_1).prevent_deep_sleep();
-                  // Trigger alarm sound and light
-                  id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
-                  id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
-                  id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;");
+                  // Trigger alarm sound and light (user-gated; both default ON)
+                  if (id(alarm_led_enabled).state) {
+                    id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
+                    id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
+                  }
+                  if (id(buzzer_enabled).state) {
+                    id(rtttl_buzzer).play(id(alarm_tone).state);
+                  }
                 }
             - if:
                 condition:
@@ -1159,6 +1163,44 @@ number:
     entity_category: config
     disabled_by_default: true
 
+  # Status LED brightness for the button status check (default 100% =
+  # shipping). Alarm flashes keep their pulse effect, which dictates its own
+  # brightness envelope; alarm control is the enable switch only.
+  - platform: template
+    name: "Status LED Brightness"
+    id: status_led_brightness
+    min_value: 5
+    max_value: 100
+    step: 5
+    unit_of_measurement: '%'
+    initial_value: 100
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: slider
+    entity_category: config
+    disabled_by_default: true
+
+  # rtttl gain; 60% equals the component default the firmware ships with.
+  - platform: template
+    name: "Buzzer Volume"
+    id: buzzer_volume
+    min_value: 0
+    max_value: 100
+    step: 5
+    unit_of_measurement: '%'
+    initial_value: 60
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: slider
+    entity_category: config
+    disabled_by_default: true
+    on_value:
+      then:
+        - lambda: |-
+            id(rtttl_buzzer).set_gain(x / 100.0f);
+
   # Runtime measurement intervals. Defaults equal the shipping compile-time
   # cadence (SEN55 10s, PM count 10s, Dallas 60s). Uses the stock poller
   # restart pattern; restored values are re-applied on every boot.
@@ -1443,6 +1485,34 @@ switch:
               - lambda: |-
                   id(deep_sleep_1).allow_deep_sleep();
 
+  # LED and buzzer feedback controls. All default ON = shipping behavior.
+  - platform: template
+    name: "Status LED Enabled"
+    id: status_led_enabled
+    icon: mdi:led-on
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    entity_category: config
+    disabled_by_default: true
+
+  - platform: template
+    name: "Alarm LED Enabled"
+    id: alarm_led_enabled
+    icon: mdi:alarm-light
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    entity_category: config
+    disabled_by_default: true
+
+  - platform: template
+    name: "Buzzer Enabled"
+    id: buzzer_enabled
+    icon: mdi:volume-high
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    entity_category: config
+    disabled_by_default: true
+
 interval:
   - interval: 10s
     startup_delay: 60s
@@ -1453,9 +1523,13 @@ interval:
               return id(alarm_active).state;
           then:
             - lambda: !lambda |-
-                id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
-                id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
-                id(rtttl_buzzer).play("siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;");
+                if (id(alarm_led_enabled).state) {
+                  id(rgb_light).turn_on().set_effect("Fast Pulse").perform();
+                  id(rgb_light).turn_on().set_rgb(1, 0, 0).set_transition_length(0).perform();
+                }
+                if (id(buzzer_enabled).state) {
+                  id(rtttl_buzzer).play(id(alarm_tone).state);
+                }
 
   # Temperature and humidity configurable intervals
   - interval: 10s
@@ -1541,6 +1615,21 @@ select:
               id(uart_ld2412).set_baud_rate(new_baud_rate);
               id(uart_ld2412).load_settings();
             }
+
+# User-editable alarm tone. Default is the exact tone the firmware has
+# always shipped with; both alarm play sites read this single source.
+text:
+  - platform: template
+    name: "Alarm Tone (RTTTL)"
+    id: alarm_tone
+    mode: text
+    max_length: 128
+    optimistic: true
+    restore_value: true
+    initial_value: "siren:d=8,o=5,b=100:d,e,d,e,d,e,d,e;"
+    entity_category: config
+    disabled_by_default: true
+    icon: "mdi:music-note"
 
 text_sensor:
   - platform: ld2412
