@@ -383,10 +383,15 @@ sensor:
       name: "Temperature Raw"
       id: sht_temperature_raw
       internal: true
+      filters:
+        # User calibration; default 0.0 leaves readings bit-identical.
+        - lambda: 'return x + id(sht_temperature_offset).state;'
     humidity:
       name: "Relative Humidity Raw"
       id: sht_humidity_raw
       internal: true
+      filters:
+        - lambda: 'return x + id(sht_humidity_offset).state;'
     update_interval: 10s
 
   # Template sensors with configurable intervals
@@ -621,6 +626,9 @@ sensor:
     name: "Temperature Probe (Dallas)"
     id: dallas_temp_probe
     update_interval: 60s
+    filters:
+      # User calibration; default 0.0 leaves readings bit-identical.
+      - lambda: 'return x + id(dallas_temp_offset).state;'
 
   - platform: ld2412
     light:
@@ -1102,6 +1110,54 @@ number:
       then:
         - lambda: |-
             id(deep_sleep_1).set_sleep_duration(x * 60 * 60 * 1000);
+
+  # Calibration offsets. Applied as filters on the raw sensor channels; the
+  # default 0.0 reproduces shipping readings exactly. Takes effect at the
+  # next measurement (<=10s SHT30, <=60s Dallas).
+  - platform: template
+    name: "Temperature Offset"
+    id: sht_temperature_offset
+    min_value: -10
+    max_value: 10
+    step: 0.1
+    unit_of_measurement: '°C'
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: box
+    entity_category: config
+    disabled_by_default: true
+
+  - platform: template
+    name: "Humidity Offset"
+    id: sht_humidity_offset
+    min_value: -20
+    max_value: 20
+    step: 0.5
+    unit_of_measurement: '%'
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: box
+    entity_category: config
+    disabled_by_default: true
+
+  - platform: template
+    name: "Dallas Temperature Offset"
+    id: dallas_temp_offset
+    min_value: -10
+    max_value: 10
+    step: 0.1
+    unit_of_measurement: '°C'
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: box
+    entity_category: config
+    disabled_by_default: true
 
   - platform: ld2412
     light_threshold:
