@@ -408,6 +408,23 @@ sensor:
     state_class: measurement
     accuracy_decimals: 1
     update_interval: never
+    on_value:
+      then:
+        - lambda: |-
+            // Mirror into the additive Fahrenheit entity on the same cadence
+            id(sht_temperature_f).publish_state(x * 9.0f / 5.0f + 32.0f);
+
+  # Additive Fahrenheit mirror of Temperature. The existing entity stays in
+  # Celsius: changing its unit would corrupt HA long-term statistics.
+  - platform: template
+    name: "Temperature F"
+    id: sht_temperature_f
+    unit_of_measurement: "°F"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    disabled_by_default: true
+    update_interval: never
 
   - platform: template
     name: "Relative Humidity"
