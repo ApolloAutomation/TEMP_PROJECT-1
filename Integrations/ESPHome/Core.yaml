@@ -1159,6 +1159,75 @@ number:
     entity_category: config
     disabled_by_default: true
 
+  # Runtime measurement intervals. Defaults equal the shipping compile-time
+  # cadence (SEN55 10s, PM count 10s, Dallas 60s). Uses the stock poller
+  # restart pattern; restored values are re-applied on every boot.
+  - platform: template
+    name: "SEN55 Update Interval"
+    id: sen55_update_interval
+    min_value: 1
+    max_value: 3600
+    step: 1
+    unit_of_measurement: 's'
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: box
+    entity_category: config
+    disabled_by_default: true
+    on_value:
+      then:
+        - lambda: |-
+            if (std::isnan(x) || x < 1) return;
+            id(sen55).stop_poller();
+            id(sen55).set_update_interval((uint32_t) (x * 1000));
+            id(sen55).start_poller();
+
+  - platform: template
+    name: "PM Count Update Interval"
+    id: pm_count_update_interval
+    min_value: 1
+    max_value: 3600
+    step: 1
+    unit_of_measurement: 's'
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: box
+    entity_category: config
+    disabled_by_default: true
+    on_value:
+      then:
+        - lambda: |-
+            if (std::isnan(x) || x < 1) return;
+            id(sen5x_number_component).stop_poller();
+            id(sen5x_number_component).set_update_interval((uint32_t) (x * 1000));
+            id(sen5x_number_component).start_poller();
+
+  - platform: template
+    name: "Dallas Update Interval"
+    id: dallas_update_interval
+    min_value: 5
+    max_value: 3600
+    step: 1
+    unit_of_measurement: 's'
+    initial_value: 60
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: box
+    entity_category: config
+    disabled_by_default: true
+    on_value:
+      then:
+        - lambda: |-
+            if (std::isnan(x) || x < 5) return;
+            id(dallas_temp_probe).stop_poller();
+            id(dallas_temp_probe).set_update_interval((uint32_t) (x * 1000));
+            id(dallas_temp_probe).start_poller();
+
   - platform: ld2412
     light_threshold:
       name: "LD2412 Light Threshold"
