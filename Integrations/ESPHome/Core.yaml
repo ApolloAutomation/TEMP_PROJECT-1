@@ -349,7 +349,11 @@ binary_sensor:
     device_class: connectivity
     entity_category: diagnostic
     disabled_by_default: true
-    lambda: 'return id(dallas_temp_probe).has_state() && !std::isnan(id(dallas_temp_probe).state);'
+    lambda: |-
+      // Stay 'unknown' until the probe has reported once; publishing before the
+      // first conversion would show a false Disconnected on every boot.
+      if (!id(dallas_temp_probe).has_state()) return {};
+      return !std::isnan(id(dallas_temp_probe).state);
 
   - platform: homeassistant
     name: "OTA Mode"

@@ -26,6 +26,12 @@ ota:
             char buf[24];
             snprintf(buf, sizeof(buf), "Error %d", x);
             id(last_ota_error).publish_state(buf);
+    on_end:
+      then:
+        - lambda: |-
+            // Successful OTA clears any previously latched error before the
+            // post-OTA reboot persists it.
+            id(last_ota_error_code) = -1;
   - platform: http_request
     id: ota_managed
     on_error:
@@ -35,6 +41,12 @@ ota:
             char buf[24];
             snprintf(buf, sizeof(buf), "Error %d", x);
             id(last_ota_error).publish_state(buf);
+    on_end:
+      then:
+        - lambda: |-
+            // Successful OTA clears any previously latched error before the
+            // post-OTA reboot persists it.
+            id(last_ota_error_code) = -1;
 
 http_request:
   verify_ssl: true
