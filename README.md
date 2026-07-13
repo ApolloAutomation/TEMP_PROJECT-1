@@ -4,4 +4,5 @@
 Links: \
 Discord (Support/feedback/discussion/future products): [https://dsc.gg/ApolloAutomation](https://dsc.gg/ApolloAutomation) \
 Shop: [https://apolloautomation.com](https://apolloautomation.com) \
-Wiki: [https://wiki.apolloautomation.com](https://wiki.apolloautomation.com/)
+Wiki: [https://wiki.apolloautomation.com](https://wiki.apolloautomation.com/) \
+Web Installer (flash or recover firmware from your browser): [https://apolloautomation.github.io/TEMP_PROJECT-1/](https://apolloautomation.github.io/TEMP_PROJECT-1/)

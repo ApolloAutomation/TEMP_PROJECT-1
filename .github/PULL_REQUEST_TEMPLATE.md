@@ -38,6 +38,7 @@ Version:
 
   - [ ] The code change has been tested and works locally
   - [ ] The code change has not yet been tested
+  - [ ] Build number incremented in Core.yaml (skip for "Does not publish" changes)
   
 If user-visible functionality or configuration variables are added/modified:
   - [ ] Added/updated documentation for the web page
