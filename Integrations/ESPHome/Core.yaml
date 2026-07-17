@@ -7,6 +7,19 @@ esphome:
   includes:
     - <esp_system.h>
   on_boot:
+    # Priority 1200 runs before the Accessory Power switch (setup_priority
+    # 1100) and the I2C bus (setup_priority BUS). Battery-focused firmware
+    # (mqtt_toy, max-battery-life) cuts the GPIO7 sensor rail on shutdown with
+    # gpio_hold_en, and that RTC pad hold survives reflashing, resets, and USB
+    # power cycles while a battery keeps the RTC domain powered. Without this
+    # release, a unit coming from that firmware boots with the rail latched
+    # LOW: the switch logs ON but the pin cannot rise, unpowered sensors clamp
+    # SCL, and the whole I2C bus scans empty. A no-op on pins never held.
+    - priority: 1200
+      then:
+        - lambda: |-
+            gpio_hold_dis(GPIO_NUM_7);
+            gpio_deep_sleep_hold_dis();
     - priority: -100
       then:
         - delay: 2s
