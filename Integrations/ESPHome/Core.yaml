@@ -1,5 +1,5 @@
 substitutions:
-  version: "26.8.18.2"
+  version: "26.8.18.6"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
   # --- AMC Omni prototype pin map -------------------------------------------
@@ -18,17 +18,15 @@ substitutions:
   display_mosi_pin: GPIO38
   display_dc_pin: GPIO37
   display_reset_pin: GPIO36
-  # Reed/door switch: bench-wired to header pins 6/7 — GPIO40 senses with the
-  # internal pull-up, GPIO39 is held LOW as the return line.
-  door_sense_pin: GPIO40
-  door_return_pin: GPIO39
-  # 3-pin PIR module (VCC / GND / OUT), plug-and-play: OUT to this pin
-  # (solder point on the bench unit; give it a connector on the PCB spin).
-  # The internal pull-down keeps Motion quiet when no PIR is attached, and a
-  # plugged-in module simply starts working. GPIO41 is free on both variants
-  # (the ETH W5500 owns 9-14). Use a 3.3V-logic PIR: AM312/HC-SR602 run on
-  # 3V3 directly; an HC-SR501 wants the 5V rail but its OUT is 3.3V logic.
-  pir_pin: GPIO41
+  # Reed/door switch: one lead on header pin 7 (GPIO39, sensed with the
+  # internal pull-up), the other on the common ground rail.
+  door_sense_pin: GPIO39
+  # 3-pin PIR module (VCC / GND / OUT), plug-and-play: OUT to header pin 6
+  # (GPIO40), VCC/GND to the combined power/ground rails. The internal
+  # pull-down keeps Motion quiet when no PIR is attached, and a plugged-in
+  # module simply starts working. Use a 3.3V-logic PIR: AM312/HC-SR602 run
+  # on 3V3 directly; an HC-SR501 wants 5V but its OUT is 3.3V logic.
+  pir_pin: GPIO40
 
 esphome:
   name: temp-pro-1
@@ -74,8 +72,6 @@ esphome:
             // Force initial updates on boot
             id(sht_temperature).publish_state(id(sht_temperature_raw).state);
             id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-            id(last_temp_update) = millis();
-            id(last_humidity_update) = millis();
     - priority: -100
       then:
         # AMC Omni: alarm latches start resolved. A door already open at boot
@@ -222,14 +218,6 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: last_temp_update
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-  - id: last_humidity_update
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
   - id: crash_count
     type: int
     restore_value: yes
@@ -476,12 +464,12 @@ display:
         it.printf(120, 139, id(font_label), C_GREEN, display::TextAlign::TOP_CENTER, "DOOR CLOSED");
       }
 
-      // Motion row: same full-width treatment (PIR feeds this on the next PCB).
+      // Motion row: same treatment and color scheme as the door row.
       if (id(motion_detected).state) {
-        it.filled_rectangle(0, 172, 240, 32, C_AMBER);
+        it.filled_rectangle(0, 172, 240, 32, C_RED);
         it.printf(120, 177, id(font_label), C_WHITE, display::TextAlign::TOP_CENTER, "MOTION DETECTED");
       } else {
-        it.printf(120, 177, id(font_label), C_GRAY, display::TextAlign::TOP_CENTER, "NO MOTION");
+        it.printf(120, 177, id(font_label), C_GREEN, display::TextAlign::TOP_CENTER, "NO MOTION");
       }
 
       // Bottom row: IP + network name in the middle, battery bottom-right.
@@ -523,6 +511,9 @@ display:
         it.filled_rectangle(194, 220, 3, 7, C_WHITE);  // terminal nub
         const int fill = (pct * 18) / 100;
         if (fill > 0) it.filled_rectangle(174, 219, fill, 9, batt_color);
+        // (Charging bolt removed: the fuel gauge's rate average lags minutes
+        // behind plug events, which reads as broken. Bring it back on the
+        // PCB spin driven by a VBUS-sense pin for instant truth.)
         it.printf(232, 215, id(font_small), C_WHITE, display::TextAlign::TOP_RIGHT, "%d%%", pct);
       }
 
@@ -639,7 +630,7 @@ binary_sensor:
       return id(batt_rate).state > -1.0f;
     filters:
       - delayed_on: 10s
-      - delayed_off: 60s
+      - delayed_off: 30s
     on_state:
       then:
         # Power state changes wake the screen so the moment is visible.
@@ -748,7 +739,9 @@ sensor:
     disabled_by_default: true
 
   # SAE-native: the SHT30 reads Celsius; the raw filter converts to
-  # Fahrenheit and applies the (Fahrenheit) user offset in one step.
+  # Fahrenheit and applies the (Fahrenheit) user offset in one step. Every
+  # reading publishes straight through to the user-facing entities — the old
+  # fleet-era minute-level republish throttle is gone.
   - platform: sht3xd
     id: sht3xd_sensor
     i2c_id: bus_a
@@ -758,13 +751,19 @@ sensor:
       internal: true
       filters:
         - lambda: 'return x * 9.0f / 5.0f + 32.0f + id(sht_temperature_offset).state;'
+      on_value:
+        then:
+          - lambda: 'id(sht_temperature).publish_state(x);'
     humidity:
       name: "Outside Humidity Raw"
       id: sht_humidity_raw
       internal: true
       filters:
         - lambda: 'return x + id(sht_humidity_offset).state;'
-    update_interval: 10s
+      on_value:
+        then:
+          - lambda: 'id(sht_humidity).publish_state(x);'
+    update_interval: 5s
 
   # Template sensors with configurable intervals
   - platform: template
@@ -794,7 +793,7 @@ sensor:
     id: dallas_temp_probe
     one_wire_id: ow_probe
     unit_of_measurement: "°F"
-    update_interval: 60s
+    update_interval: 5s
     filters:
       - lambda: 'return x * 9.0f / 5.0f + 32.0f + id(dallas_temp_offset).state;'
     on_value:
@@ -823,6 +822,10 @@ sensor:
   - platform: max17048
     id: max_17048
     i2c_id: bus_a
+    # Fast polling so the charging bolt and External Power react as quickly
+    # as the gauge's internal averaging allows (~1 min); the true instant
+    # fix is a VBUS-sense pin on the PCB spin.
+    update_interval: 10s
     battery_voltage:
       name: Battery voltage
       id: batt_v
@@ -979,47 +982,6 @@ number:
     mode: box
     entity_category: config
     disabled_by_default: true
-
-  # Configurable temperature and humidity intervals (in minutes)
-  - platform: template
-    id: temperature_update_interval
-    name: "Outside Temperature Update Interval"
-    min_value: 1
-    max_value: 1000
-    step: 1
-    unit_of_measurement: 'm'
-    initial_value: 1
-    optimistic: true
-    restore_value: true
-    mode: box
-    entity_category: config
-    disabled_by_default: true
-    on_value:
-      then:
-        - lambda: |-
-            // Force immediate temperature update when interval changes
-            id(sht_temperature).publish_state(id(sht_temperature_raw).state);
-            id(last_temp_update) = millis();
-
-  - platform: template
-    id: humidity_update_interval
-    name: "Outside Humidity Update Interval"
-    min_value: 1
-    max_value: 1000
-    step: 1
-    unit_of_measurement: 'm'
-    initial_value: 1
-    optimistic: true
-    restore_value: true
-    mode: box
-    entity_category: config
-    disabled_by_default: true
-    on_value:
-      then:
-        - lambda: |-
-            // Force immediate humidity update when interval changes
-            id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-            id(last_humidity_update) = millis();
 
   - platform: template
     name: "Max Door Open Duration"
@@ -1196,12 +1158,12 @@ number:
 
   - platform: template
     name: "Inside Temp Update Interval"
-    id: dallas_update_interval
+    id: inside_temp_update_interval
     min_value: 5
     max_value: 3600
     step: 1
     unit_of_measurement: 's'
-    initial_value: 60
+    initial_value: 5
     optimistic: true
     restore_value: true
     update_interval: never
@@ -1227,13 +1189,6 @@ switch:
     id: accessory_power
     restore_mode: ALWAYS_ON
     setup_priority: 1100
-    internal: true
-
-  # Door reed return line: held LOW so the reed can pull the sense pin down.
-  - platform: gpio
-    pin: ${door_return_pin}
-    id: door_sensor_return
-    restore_mode: ALWAYS_OFF
     internal: true
 
   - platform: template
@@ -1516,24 +1471,6 @@ interval:
                   - lambda: |-
                       id(halo_last_report).publish_state("skipped: no probe reading");
 
-  # Temperature and humidity configurable intervals
-  - interval: 10s
-    then:
-      - lambda: |-
-          // Temperature update check (min to milliseconds)
-          uint32_t temp_interval_ms = id(temperature_update_interval).state * 60 * 1000;
-          if (millis() - id(last_temp_update) >= temp_interval_ms) {
-            id(sht_temperature).publish_state(id(sht_temperature_raw).state);
-            id(last_temp_update) = millis();
-          }
-          
-          // Humidity update check (min to milliseconds)
-          uint32_t humidity_interval_ms = id(humidity_update_interval).state * 60 * 1000;
-          if (millis() - id(last_humidity_update) >= humidity_interval_ms) {
-            id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-            id(last_humidity_update) = millis();
-          }
-
 script:
   # Restarted every time the door opens, stopped when it closes. Only fires
   # the latch if the door is still open when the configured delay elapses.
@@ -1571,8 +1508,6 @@ script:
           // Publish SHT temperature and humidity values
           id(sht_temperature).publish_state(id(sht_temperature_raw).state);
           id(sht_humidity).publish_state(id(sht_humidity_raw).state);
-          id(last_temp_update) = millis();
-          id(last_humidity_update) = millis();
 
 # User-editable alarm tone. Default is the exact tone the firmware has
 # always shipped with; both alarm play sites read this single source.
