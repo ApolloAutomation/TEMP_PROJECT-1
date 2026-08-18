@@ -1,5 +1,5 @@
 substitutions:
-  version: "26.8.15.11"
+  version: "26.8.15.14"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
   # --- AMC Omni prototype pin map -------------------------------------------
@@ -240,6 +240,12 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # Battery screen saver: millis() deadline until which the screen stays
+  # awake. Initialized to 60s so every boot shows the screen for a minute.
+  - id: screen_wake_until
+    type: uint32_t
+    restore_value: no
+    initial_value: '60000'
 
 i2c:
   - sda: GPIO16
@@ -352,33 +358,61 @@ display:
       width: 240
       height: 240
     invert_colors: true
-    # Landscape mounting; if the image is upside-down on the bench, use 270.
-    rotation: 90
+    # Landscape mounting, flipped to match the case orientation (was 90).
+    rotation: 270
     update_interval: 1s
     lambda: |-
       if (id(display_shutting_down) || !id(display_enabled).state) return;
+
+      // Battery screen saver: on battery power, blank the screen unless it
+      // was recently woken (motion/door/power event) or an alarm is latched.
+      // NOTE: with BLK hardwired on, "blank" is a black frame — the backlight
+      // itself needs a GPIO on the next PCB spin for true dark + power saving.
+      if (id(battery_screensaver).state && !id(external_power).state &&
+          millis() > id(screen_wake_until) &&
+          !id(door_open_too_long).state && !id(interior_temp_too_long).state &&
+          !id(alarm_active).state) {
+        return;
+      }
 
       const auto C_WHITE = Color(255, 255, 255);
       const auto C_GRAY  = Color(140, 140, 140);
       const auto C_RED   = Color(255, 45, 45);
       const auto C_GREEN = Color(45, 210, 90);
       const auto C_AMBER = Color(255, 170, 0);
-      const auto C_CYAN  = Color(70, 180, 255);
+      const auto C_NAVY  = Color(30, 43, 79);  // HALO brand navy
 
-      // Boot splash for the first few seconds
+      // Boot splash: the HALO brand lockup on white, drawn vectorially.
       if (millis() < 6000) {
-        it.printf(120, 70, id(font_big), C_CYAN, display::TextAlign::TOP_CENTER, "APOLLO");
-        it.printf(120, 125, id(font_label), C_WHITE, display::TextAlign::TOP_CENTER, "AMC OMNI");
-        it.printf(120, 155, id(font_small), C_GRAY, display::TextAlign::TOP_CENTER, "v${version}");
+        it.fill(C_WHITE);
+        // H ring mark with the red dot accent
+        for (int r = 42; r <= 44; r++) it.circle(120, 76, r, C_NAVY);
+        it.filled_circle(151, 107, 6, C_RED);
+        it.printf(120, 76, id(font_big), C_NAVY, display::TextAlign::CENTER, "H");
+        // HALO wordmark: navy HAL + red O, centered as a unit
+        int bx, by, w1, w2, bh;
+        it.get_text_bounds(0, 0, "HAL", id(font_big), display::TextAlign::TOP_LEFT, &bx, &by, &w1, &bh);
+        it.get_text_bounds(0, 0, "O", id(font_big), display::TextAlign::TOP_LEFT, &bx, &by, &w2, &bh);
+        int hx = (240 - w1 - w2) / 2;
+        it.print(hx, 126, id(font_big), C_NAVY, "HAL");
+        it.print(hx + w1, 126, id(font_big), C_RED, "O");
+        // Sub-brand lines
+        it.get_text_bounds(0, 0, "by MyMortuary", id(font_small), display::TextAlign::TOP_LEFT, &bx, &by, &w1, &bh);
+        it.get_text_bounds(0, 0, "Cooler", id(font_small), display::TextAlign::TOP_LEFT, &bx, &by, &w2, &bh);
+        hx = (240 - w1 - w2) / 2;
+        it.print(hx, 186, id(font_small), C_NAVY, "by MyMortuary");
+        it.print(hx + w1, 186, id(font_small), C_RED, "Cooler");
+        it.printf(120, 208, id(font_small), C_NAVY, display::TextAlign::TOP_CENTER,
+                  "S M A R T  M O N I T O R I N G");
         return;
       }
 
       // Client color language: red = inside, blue = outside.
       const auto C_BLUE = Color(70, 150, 255);
 
-      // Header: column labels, replaced by a FLASHING red banner while any
-      // alarm latch is active (alternates banner/labels each 1s frame).
-      // With multiple alarms latched, successive flashes rotate through them.
+      // Top strip: HALO brand bar, replaced by a FLASHING red banner while
+      // any alarm latch is active. With multiple alarms latched, successive
+      // flashes rotate through them.
       const char *alarm_texts[3];
       int n_alarms = 0;
       if (id(door_open_too_long).state)     alarm_texts[n_alarms++] = "DOOR OPEN TOO LONG";
@@ -389,47 +423,61 @@ display:
         it.printf(120, 2, id(font_label), C_WHITE, display::TextAlign::TOP_CENTER,
                   "%s", alarm_texts[(millis() / 2000) % n_alarms]);
       } else {
-        it.printf(60, 3, id(font_label), C_RED, display::TextAlign::TOP_CENTER, "INSIDE");
-        it.printf(180, 3, id(font_label), C_BLUE, display::TextAlign::TOP_CENTER, "OUTSIDE");
+        // Mini H-ring mark + HALO wordmark, centered as a group
+        int bx, by, w1, w2, bh;
+        it.get_text_bounds(0, 0, "HAL", id(font_label), display::TextAlign::TOP_LEFT, &bx, &by, &w1, &bh);
+        it.get_text_bounds(0, 0, "O", id(font_label), display::TextAlign::TOP_LEFT, &bx, &by, &w2, &bh);
+        int x = (240 - (20 + 8 + w1 + w2)) / 2;
+        it.circle(x + 10, 12, 10, C_WHITE);
+        it.circle(x + 10, 12, 9, C_WHITE);
+        it.filled_circle(x + 17, 19, 3, C_RED);
+        it.printf(x + 10, 12, id(font_small), C_WHITE, display::TextAlign::CENTER, "H");
+        x += 28;
+        it.print(x, 2, id(font_label), C_WHITE, "HAL");
+        it.print(x + w1, 2, id(font_label), C_RED, "O");
       }
 
+      // Column labels under the brand bar
+      it.printf(60, 26, id(font_label), C_RED, display::TextAlign::TOP_CENTER, "INSIDE");
+      it.printf(180, 26, id(font_label), C_BLUE, display::TextAlign::TOP_CENTER, "OUTSIDE");
+
       // The two headline Fahrenheit readings; outside RH tucked underneath.
-      it.line(120, 30, 120, 118, C_GRAY);
-      it.line(0, 124, 239, 124, C_GRAY);
+      it.line(120, 30, 120, 126, C_GRAY);
+      it.line(0, 130, 239, 130, C_GRAY);
       if (id(dallas_temp_probe).has_state() && !std::isnan(id(dallas_temp_probe).state)) {
         const float f = id(dallas_temp_probe).state;  // already °F
-        it.printf(60, 34, id(font_big), C_RED, display::TextAlign::TOP_CENTER,
+        it.printf(60, 48, id(font_big), C_RED, display::TextAlign::TOP_CENTER,
                   f >= 100.0f || f <= -10.0f ? "%.0f°" : "%.1f°", f);
       } else {
-        it.printf(60, 34, id(font_big), C_GRAY, display::TextAlign::TOP_CENTER, "--");
-        it.printf(60, 96, id(font_small), C_GRAY, display::TextAlign::TOP_CENTER, "NO PROBE");
+        it.printf(60, 48, id(font_big), C_GRAY, display::TextAlign::TOP_CENTER, "--");
+        it.printf(60, 108, id(font_small), C_GRAY, display::TextAlign::TOP_CENTER, "NO PROBE");
       }
       if (!std::isnan(id(sht_temperature).state)) {
         const float f = id(sht_temperature).state;  // already °F
-        it.printf(180, 34, id(font_big), C_BLUE, display::TextAlign::TOP_CENTER,
+        it.printf(180, 48, id(font_big), C_BLUE, display::TextAlign::TOP_CENTER,
                   f >= 100.0f || f <= -10.0f ? "%.0f°" : "%.1f°", f);
       } else {
-        it.printf(180, 34, id(font_big), C_GRAY, display::TextAlign::TOP_CENTER, "--");
+        it.printf(180, 48, id(font_big), C_GRAY, display::TextAlign::TOP_CENTER, "--");
       }
       if (!std::isnan(id(sht_humidity).state)) {
-        it.printf(180, 94, id(font_label), C_BLUE, display::TextAlign::TOP_CENTER,
+        it.printf(180, 106, id(font_label), C_BLUE, display::TextAlign::TOP_CENTER,
                   "RH %.0f%%", id(sht_humidity).state);
       }
 
       // Door row: full-width bar when open, matching the motion row below.
       if (id(door_sensor).state) {
-        it.filled_rectangle(0, 130, 240, 36, C_RED);
-        it.printf(120, 136, id(font_label), C_WHITE, display::TextAlign::TOP_CENTER, "DOOR OPEN");
+        it.filled_rectangle(0, 134, 240, 32, C_RED);
+        it.printf(120, 139, id(font_label), C_WHITE, display::TextAlign::TOP_CENTER, "DOOR OPEN");
       } else {
-        it.printf(120, 136, id(font_label), C_GREEN, display::TextAlign::TOP_CENTER, "DOOR CLOSED");
+        it.printf(120, 139, id(font_label), C_GREEN, display::TextAlign::TOP_CENTER, "DOOR CLOSED");
       }
 
       // Motion row: same full-width treatment (PIR feeds this on the next PCB).
       if (id(motion_detected).state) {
-        it.filled_rectangle(0, 170, 240, 36, C_AMBER);
-        it.printf(120, 176, id(font_label), C_WHITE, display::TextAlign::TOP_CENTER, "MOTION DETECTED");
+        it.filled_rectangle(0, 172, 240, 32, C_AMBER);
+        it.printf(120, 177, id(font_label), C_WHITE, display::TextAlign::TOP_CENTER, "MOTION DETECTED");
       } else {
-        it.printf(120, 176, id(font_label), C_GRAY, display::TextAlign::TOP_CENTER, "NO MOTION");
+        it.printf(120, 177, id(font_label), C_GRAY, display::TextAlign::TOP_CENTER, "NO MOTION");
       }
 
       // Bottom row: IP + network name in the middle, battery bottom-right.
@@ -523,9 +571,12 @@ binary_sensor:
       - delayed_on: 100ms
       - delayed_off: 100ms
     # Redraw immediately on any door change so the display cadence never
-    # makes the door state feel laggy.
+    # makes the door state feel laggy; door activity also wakes the battery
+    # screen saver.
     on_state:
       then:
+        - lambda: |-
+            id(screen_wake_until) = millis() + (uint32_t)(id(screen_wake_time).state * 1000.0f);
         - component.update: omni_display
     on_press:
       then:
@@ -560,6 +611,29 @@ binary_sensor:
     device_class: motion
     on_state:
       then:
+        # Motion wakes the battery screen saver.
+        - lambda: |-
+            id(screen_wake_until) = millis() + (uint32_t)(id(screen_wake_time).state * 1000.0f);
+        - component.update: omni_display
+
+  # Wall power vs battery, inferred from the fuel gauge's discharge rate —
+  # the board has no VBUS sense pin. Unknown reads as powered so the screen
+  # fails visible. Doubles as the "power is out" signal for HA notifications.
+  - platform: template
+    name: "External Power"
+    id: external_power
+    device_class: plug
+    lambda: |-
+      if (std::isnan(id(batt_rate).state)) return true;
+      return id(batt_rate).state > -1.0f;
+    filters:
+      - delayed_on: 10s
+      - delayed_off: 60s
+    on_state:
+      then:
+        # Power state changes wake the screen so the moment is visible.
+        - lambda: |-
+            id(screen_wake_until) = millis() + (uint32_t)(id(screen_wake_time).state * 1000.0f);
         - component.update: omni_display
 
   # Latched when the inside (probe) temp has been above Max Inside
@@ -750,6 +824,13 @@ sensor:
         - lambda: |
             if (x > 100) return 100;
             else return (x);
+    # CRATE register (%/hr): negative = discharging = running on battery.
+    # Feeds the External Power detection and the battery screen saver.
+    rate:
+      name: "Battery Rate"
+      id: batt_rate
+      entity_category: diagnostic
+      disabled_by_default: true
 
   # Runtime health diagnostics
   - platform: debug
@@ -979,6 +1060,22 @@ number:
     entity_category: config
     disabled_by_default: true
 
+  # How long the battery screen saver keeps the screen on after activity.
+  - platform: template
+    name: "Screen Wake Time"
+    id: screen_wake_time
+    min_value: 5
+    max_value: 600
+    step: 5
+    unit_of_measurement: 's'
+    initial_value: 30
+    optimistic: true
+    restore_value: true
+    update_interval: never
+    mode: box
+    entity_category: config
+    disabled_by_default: true
+
   # Deep sleep duration configuration
   - platform: template
     name: "Sleep Duration"
@@ -1174,6 +1271,18 @@ switch:
                 !id(door_open_too_long).state) {
               id(rgb_light).turn_off().perform();
             }
+
+  # On battery power, blank the screen unless motion/door activity woke it.
+  - platform: template
+    name: "Battery Screen Saver"
+    id: battery_screensaver
+    icon: mdi:monitor-off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    on_turn_off:
+      then:
+        - component.update: omni_display
 
   # Blanks the panel via the lambda gate (backlight stays on; BLK has no GPIO).
   - platform: template
