@@ -1,5 +1,5 @@
 substitutions:
-  version: "26.8.15.14"
+  version: "26.8.18.1"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
   # --- AMC Omni prototype pin map -------------------------------------------
@@ -1272,6 +1272,15 @@ switch:
               id(rgb_light).turn_off().perform();
             }
 
+  # Master enable for HALO webhook reporting; needs Device ID + Secret set.
+  - platform: template
+    name: "HALO Reporting"
+    id: halo_reporting
+    icon: mdi:cloud-upload
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
   # On battery power, blank the screen unless motion/door activity woke it.
   - platform: template
     name: "Battery Screen Saver"
@@ -1408,6 +1417,94 @@ interval:
                   id(rtttl_buzzer).play(id(alarm_tone).state);
                 }
 
+  # ── HALO Smart Monitoring reporting ──────────────────────────────────────
+  # MyMortuaryCooler HALO webhook, per their TEMP-1 v2.0.0 contract: HTTP GET
+  # every 60s with device/secret/tC/rh/rssi/ssid/door/uptime. tC is Celsius
+  # on the wire (our entities are native °F, converted here). Reports only
+  # when HALO Reporting is on, credentials are set, and the probe is valid.
+  - interval: 60s
+    startup_delay: 30s
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_on: halo_reporting
+              - lambda: 'return !id(halo_device_id).state.empty() && !id(halo_secret).state.empty();'
+          then:
+            - if:
+                condition:
+                  lambda: 'return !std::isnan(id(dallas_temp_probe).state);'
+                then:
+                  - http_request.get:
+                      url: !lambda |-
+                        auto enc = [](const std::string &s) {
+                          std::string out;
+                          char buf[4];
+                          for (unsigned char c : s) {
+                            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                              out += (char) c;
+                            } else {
+                              snprintf(buf, sizeof(buf), "%%%02X", c);
+                              out += buf;
+                            }
+                          }
+                          return out;
+                        };
+                        char num[24];
+                        std::string url = "https://fast-wombat-719.convex.site/apollo";
+                        url += "?device=" + enc(id(halo_device_id).state);
+                        url += "&secret=" + enc(id(halo_secret).state);
+                        // HALO expects Celsius; entities are native Fahrenheit
+                        snprintf(num, sizeof(num), "%.2f",
+                                 (id(dallas_temp_probe).state - 32.0f) * 5.0f / 9.0f);
+                        url += std::string("&tC=") + num;
+                        const float rh = id(sht_humidity).state;
+                        snprintf(num, sizeof(num), "%.1f", std::isnan(rh) ? -1.0f : rh);
+                        url += std::string("&rh=") + num;
+                        #ifdef USE_WIFI
+                        snprintf(num, sizeof(num), "%d", (int) wifi::global_wifi_component->wifi_rssi());
+                        url += std::string("&rssi=") + num;
+                        url += "&ssid=" + enc(wifi::global_wifi_component->wifi_ssid());
+                        #else
+                        url += "&rssi=0&ssid=ETH";
+                        #endif
+                        url += std::string("&door=") + (id(door_sensor).state ? "1" : "0");
+                        snprintf(num, sizeof(num), "%d", (int) id(sys_uptime).state);
+                        url += std::string("&uptime=") + num;
+                        return url;
+                      on_response:
+                        then:
+                          - lambda: |-
+                              char buf[48];
+                              snprintf(buf, sizeof(buf), "HTTP %d at uptime %us",
+                                       (int) response->status_code, (uint32_t) id(sys_uptime).state);
+                              id(halo_last_report).publish_state(buf);
+                      on_error:
+                        then:
+                          - lambda: |-
+                              id(halo_last_report).publish_state("send failed");
+                  # Subtle green report blink (HALO spec), unless an alarm
+                  # owns the LED or the status LED is disabled.
+                  - if:
+                      condition:
+                        and:
+                          - switch.is_on: status_led_enabled
+                          - binary_sensor.is_off: door_open_too_long
+                          - binary_sensor.is_off: interior_temp_too_long
+                          - binary_sensor.is_off: alarm_active
+                      then:
+                        - light.turn_on:
+                            id: rgb_light
+                            brightness: 20%
+                            red: 0%
+                            green: 100%
+                            blue: 0%
+                        - delay: 300ms
+                        - light.turn_off: rgb_light
+                else:
+                  - lambda: |-
+                      id(halo_last_report).publish_state("skipped: no probe reading");
+
   # Temperature and humidity configurable intervals
   - interval: 10s
     then:
@@ -1469,6 +1566,31 @@ script:
 # User-editable alarm tone. Default is the exact tone the firmware has
 # always shipped with; both alarm play sites read this single source.
 text:
+  # ── HALO Smart Monitoring provisioning ──────────────────────────────────
+  # Per-device credentials for the MyMortuaryCooler HALO backend. Set both
+  # from HA, then flip HALO Reporting on. Kept as runtime entities (instead
+  # of compile-time placeholders like HALO's TEMP-1 reference firmware) so
+  # every Omni runs identical firmware.
+  - platform: template
+    name: "HALO Device ID"
+    id: halo_device_id
+    mode: text
+    max_length: 64
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    icon: "mdi:identifier"
+
+  - platform: template
+    name: "HALO Webhook Secret"
+    id: halo_secret
+    mode: password
+    max_length: 128
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    icon: "mdi:key"
+
   - platform: template
     name: "Alarm Tone (RTTTL)"
     id: alarm_tone
@@ -1514,6 +1636,15 @@ text_sensor:
     name: "Wake Cause"
     id: wake_cause
     icon: "mdi:sleep-off"
+    entity_category: diagnostic
+    disabled_by_default: true
+    update_interval: never
+
+  # Result of the most recent HALO webhook report (diagnostic).
+  - platform: template
+    name: "HALO Last Report"
+    id: halo_last_report
+    icon: "mdi:cloud-check"
     entity_category: diagnostic
     disabled_by_default: true
     update_interval: never
