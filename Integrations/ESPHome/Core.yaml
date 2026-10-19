@@ -1,5 +1,5 @@
 substitutions:
-  version: "26.10.19.1"
+  version: "26.10.19.2"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
 esphome:
@@ -1266,13 +1266,17 @@ interval:
 script:
   - id: reportAllValues
     then:
+      # sen5x_number_component must run BEFORE sen55: both talk to the SEN55 at 0x69,
+      # sen5x_number's read is atomic (blocking) while sen55's is split across a 20ms
+      # timeout, and running the atomic one second lands inside sen55's window and
+      # corrupts its read on every wake.
+      - component.update: sen5x_number_component
       - component.update: sen55
       - component.update: sht3xd_sensor
       - component.update: dallas_temp_probe
       - component.update: dallas_temp_probe_2
       - component.update: dallas_temp_probe_3
       - component.update: dallas_temp_probe_4
-      - component.update: sen5x_number_component
       - component.update: max_17048
       - delay: 2s
       - lambda: |-
