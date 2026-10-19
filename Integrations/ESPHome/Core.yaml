@@ -1,10 +1,16 @@
 substitutions:
-  version: "26.10.19.2"
+  version: "26.10.19.3"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
 esphome:
   name: temp-pro-1
   on_boot:
+    # Compile-time constant: publish once per boot (every deep-sleep wake is a boot)
+    - priority: 500
+      then:
+        - text_sensor.template.publish:
+            id: apollo_firmware_version
+            state: "${version}"
     - priority: -100
       then:
         - delay: 2s
@@ -1343,6 +1349,20 @@ text_sensor:
       name: "LD2412 BT MAC"
       id: ld2412_bt_mac
       disabled_by_default: true
+
+  # Fleet-standard identity diagnostics; network diagnostics live in the variant files
+  - platform: version
+    name: "ESPHome Version"
+    id: esphome_version
+    hide_timestamp: true
+    entity_category: "diagnostic"
+
+  - platform: template
+    name: "Apollo Firmware Version"
+    id: apollo_firmware_version
+    update_interval: never
+    entity_category: "diagnostic"
+
   - platform: template
     name: "OTA URL"
     id: ota_url

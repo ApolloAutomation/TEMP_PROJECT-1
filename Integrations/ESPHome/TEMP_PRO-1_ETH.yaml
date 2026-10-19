@@ -44,6 +44,19 @@ ethernet:
   interrupt_pin: GPIO13
   reset_pin: GPIO14
 
+# Ethernet diagnostics. Cross-subnet installs often block mDNS, so the raw IP is the usable handle.
+text_sensor:
+  - platform: ethernet_info
+    ip_address:
+      name: "IP Address"
+      id: eth_ip
+      entity_category: "diagnostic"
+    mac_address:
+      name: "MAC Address"
+      id: eth_mac_address
+      entity_category: "diagnostic"
+      disabled_by_default: true
+
 script:
   - id: statusCheck
     then:

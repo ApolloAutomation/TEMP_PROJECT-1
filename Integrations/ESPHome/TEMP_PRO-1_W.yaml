@@ -41,6 +41,36 @@ wifi:
 
 captive_portal:
 
+# WiFi diagnostics. RSSI also refreshes on every WiFi connect, so it reports inside a deep-sleep wake.
+sensor:
+  - platform: wifi_signal
+    name: RSSI
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: "diagnostic"
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      id: wifi_ip
+      entity_category: "diagnostic"
+    ssid:
+      name: "Connected SSID"
+      id: wifi_ssid
+      entity_category: "diagnostic"
+      disabled_by_default: true
+    bssid:
+      name: "Connected BSSID"
+      id: wifi_bssid
+      entity_category: "diagnostic"
+      disabled_by_default: true
+    mac_address:
+      name: "MAC Address"
+      id: wifi_mac_address
+      entity_category: "diagnostic"
+      disabled_by_default: true
+
 script:
   - id: statusCheck
     then:
