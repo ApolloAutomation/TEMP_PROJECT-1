@@ -1,10 +1,16 @@
 substitutions:
-  version: "26.5.20.1"
+  version: "26.10.21.1"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
 esphome:
   name: temp-pro-1
   on_boot:
+    # Publish the firmware version once per boot
+    - priority: 500
+      then:
+        - text_sensor.template.publish:
+            id: apollo_firmware_version
+            state: "${version}"
     - priority: -100
       then:
         - delay: 2s
@@ -542,11 +548,33 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
 
-  # Dallas Temperature Probe
+  # Dallas probes: up to 4 via the 3.5mm splitter (probes 2-4 disabled by default)
   - platform: dallas_temp
     name: "Temperature Probe (Dallas)"
     id: dallas_temp_probe
+    index: 0
     update_interval: 60s
+
+  - platform: dallas_temp
+    name: "Temperature Probe 2 (Dallas)"
+    id: dallas_temp_probe_2
+    index: 1
+    update_interval: 60s
+    disabled_by_default: true
+
+  - platform: dallas_temp
+    name: "Temperature Probe 3 (Dallas)"
+    id: dallas_temp_probe_3
+    index: 2
+    update_interval: 60s
+    disabled_by_default: true
+
+  - platform: dallas_temp
+    name: "Temperature Probe 4 (Dallas)"
+    id: dallas_temp_probe_4
+    index: 3
+    update_interval: 60s
+    disabled_by_default: true
 
   - platform: ld2412
     light:
@@ -1242,10 +1270,15 @@ interval:
 script:
   - id: reportAllValues
     then:
+      # sen5x_number must run before sen55: run second, its blocking read
+      # corrupts sen55's pending read of the same SEN55.
+      - component.update: sen5x_number_component
       - component.update: sen55
       - component.update: sht3xd_sensor
       - component.update: dallas_temp_probe
-      - component.update: sen5x_number_component
+      - component.update: dallas_temp_probe_2
+      - component.update: dallas_temp_probe_3
+      - component.update: dallas_temp_probe_4
       - component.update: max_17048
       - delay: 2s
       - lambda: |-
@@ -1312,6 +1345,20 @@ text_sensor:
       name: "LD2412 BT MAC"
       id: ld2412_bt_mac
       disabled_by_default: true
+
+  # Diagnostics (network ones are in the W/ETH files)
+  - platform: version
+    name: "ESPHome Version"
+    id: esphome_version
+    hide_timestamp: true
+    entity_category: "diagnostic"
+
+  - platform: template
+    name: "Apollo Firmware Version"
+    id: apollo_firmware_version
+    update_interval: never
+    entity_category: "diagnostic"
+
   - platform: template
     name: "OTA URL"
     id: ota_url
