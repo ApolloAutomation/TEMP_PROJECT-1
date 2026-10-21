@@ -41,7 +41,7 @@ wifi:
 
 captive_portal:
 
-# WiFi diagnostics. RSSI also refreshes on every WiFi connect, so it reports inside a deep-sleep wake.
+# WiFi diagnostics
 sensor:
   - platform: wifi_signal
     name: RSSI

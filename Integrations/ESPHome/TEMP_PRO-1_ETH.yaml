@@ -44,7 +44,7 @@ ethernet:
   interrupt_pin: GPIO13
   reset_pin: GPIO14
 
-# Ethernet diagnostics. Cross-subnet installs often block mDNS, so the raw IP is the usable handle.
+# Ethernet diagnostics
 text_sensor:
   - platform: ethernet_info
     ip_address:

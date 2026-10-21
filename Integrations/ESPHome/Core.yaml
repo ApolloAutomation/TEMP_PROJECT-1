@@ -5,7 +5,7 @@ substitutions:
 esphome:
   name: temp-pro-1
   on_boot:
-    # Compile-time constant: publish once per boot (every deep-sleep wake is a boot)
+    # Publish the firmware version once per boot
     - priority: 500
       then:
         - text_sensor.template.publish:
@@ -548,9 +548,7 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
 
-  # Dallas Temperature Probes
-  # Indexed so up to 4 probes can share the bus via a 3.5mm splitter with no yaml edits.
-  # Probes 2-4 are disabled by default; enable their entities to use them.
+  # Dallas probes: up to 4 via the 3.5mm splitter (probes 2-4 disabled by default)
   - platform: dallas_temp
     name: "Temperature Probe (Dallas)"
     id: dallas_temp_probe
@@ -1272,10 +1270,8 @@ interval:
 script:
   - id: reportAllValues
     then:
-      # sen5x_number_component must run BEFORE sen55: both talk to the SEN55 at 0x69,
-      # sen5x_number's read is atomic (blocking) while sen55's is split across a 20ms
-      # timeout, and running the atomic one second lands inside sen55's window and
-      # corrupts its read on every wake.
+      # sen5x_number must run before sen55: run second, its blocking read
+      # corrupts sen55's pending read of the same SEN55.
       - component.update: sen5x_number_component
       - component.update: sen55
       - component.update: sht3xd_sensor
@@ -1350,7 +1346,7 @@ text_sensor:
       id: ld2412_bt_mac
       disabled_by_default: true
 
-  # Fleet-standard identity diagnostics; network diagnostics live in the variant files
+  # Diagnostics (network ones are in the W/ETH files)
   - platform: version
     name: "ESPHome Version"
     id: esphome_version
