@@ -153,6 +153,7 @@ ethernet:
     - lambda: |-
         ESP_LOGI("Apollo", "Ethernet connected; preventing deep sleep");
         id(deep_sleep_1).prevent_deep_sleep();
+    - script.stop: ethernet_rearm_sleep
     # Keep WiFi up alongside Ethernet so Home Assistant's connection to the
     # WiFi address survives; release it only when WiFi has no network to offer
     - if:
@@ -192,15 +193,9 @@ ethernet:
     - script.execute: check_for_updates
     - component.update: network_connection
   on_disconnect:
-    # Off the cable, deep sleep follows Prevent Sleep and OTA Mode again
-    - if:
-        condition:
-          and:
-            - switch.is_off: prevent_sleep
-            - binary_sensor.is_off: ota_mode
-            - lambda: "return !id(alarm_triggered_on_wake);"
-        then:
-          - lambda: "id(deep_sleep_1).allow_deep_sleep();"
+    # Off the cable, deep sleep follows Prevent Sleep and OTA Mode again, but
+    # only after the link-blip window (runs in the background)
+    - script.execute: ethernet_rearm_sleep
     # Cable gone, so bring WiFi up to rejoin or open the provisioning hotspot
     - lambda: "id(ethernet_expected) = false;"
     - if:
@@ -1691,6 +1686,30 @@ interval:
           }
 
 script:
+  # Re-allows deep sleep after Ethernet drops, but only once the link has been
+  # down for 60s. A pending deep sleep fires as soon as it is allowed, so a
+  # switch reboot, PoE renegotiation or DHCP loss must not release it while
+  # the cable is still in
+  - id: ethernet_rearm_sleep
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            ethernet.connected:
+          timeout: 60s
+      - if:
+          condition:
+            and:
+              - not:
+                  ethernet.connected:
+              - switch.is_off: prevent_sleep
+              - binary_sensor.is_off: ota_mode
+              - lambda: "return !id(alarm_triggered_on_wake);"
+          then:
+            - lambda: |-
+                ESP_LOGI("Apollo", "Ethernet down for 60s; deep sleep allowed again");
+                id(deep_sleep_1).allow_deep_sleep();
+
   - id: apply_ota_source
     # Sets the OTA manifest URL from the Firmware Channel select (Stable/Beta).
     # The manifests are per-variant (ota_*_manifest substitutions) so the legacy
