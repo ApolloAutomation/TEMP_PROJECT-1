@@ -1,5 +1,5 @@
 substitutions:
-  version: "26.11.15.2"
+  version: "26.11.15.1"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
   # Manifest URL bases. Stable = GitHub Pages (main branch builds).
