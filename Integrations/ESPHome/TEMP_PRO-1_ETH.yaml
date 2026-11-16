@@ -7,6 +7,9 @@ substitutions:
   beta_manifest_key: "e"
   # Keep WiFi off on the first boot after upgrading from the Ethernet-only firmware
   ethernet_expected_default: "true"
+  # Keep "MAC Address" on the Ethernet MAC, as the Ethernet-only firmware had it
+  ethernet_mac_name: "MAC Address"
+  wifi_mac_name: "WiFi MAC Address"
 
 esphome:
   name: "apollo-temp-pro-1-eth"

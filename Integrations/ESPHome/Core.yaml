@@ -21,6 +21,10 @@ substitutions:
   wifi_fallback: "true"
   # The legacy _ETH shim sets "true" so an upgraded Ethernet unit's first boot is WiFi-silent
   ethernet_expected_default: "false"
+  # Which MAC keeps the "MAC Address" entity. The legacy _ETH shim swaps these
+  # so fielded Ethernet units keep showing the Ethernet MAC there
+  wifi_mac_name: "MAC Address"
+  ethernet_mac_name: "Ethernet MAC Address"
 
 esphome:
   name: temp-pro-1
@@ -35,6 +39,22 @@ esphome:
   includes:
     - <lwip/dns.h>
   on_boot:
+    # Track the Ethernet cable link (PHY up/down) ahead of DHCP. Registered before
+    # the ethernet component starts the W5500 so the first link-up isn't missed;
+    # creating the default event loop here is safe (network setup accepts it existing)
+    - priority: 700
+      then:
+        - lambda: |-
+            esp_event_loop_create_default();
+            esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
+                [](void *, esp_event_base_t, int32_t event, void *) {
+                  if (event == ETHERNET_EVENT_CONNECTED) {
+                    id(eth_link_up) = true;
+                  } else if (event == ETHERNET_EVENT_DISCONNECTED || event == ETHERNET_EVENT_STOP) {
+                    id(eth_link_up) = false;
+                  }
+                },
+                nullptr);
     # Keep WiFi off when Ethernet is expected, so the fallback hotspot can't
     # broadcast while Ethernet waits for DHCP. Runs after globals restore (800), before wifi setup.
     - priority: 600
@@ -384,8 +404,9 @@ api:
                     - switch.is_off: prevent_sleep
                     - binary_sensor.is_off: ota_mode
                     # A wired device never deep sleeps
-                    - not:
-                        ethernet.connected:
+                    # Not on Ethernet: no IP, no cable link, and not inside the
+                    # 60s link-blip window (see ethernet_rearm_sleep)
+                    - lambda: "return !id(ethernet_1).is_connected() && !id(eth_link_up) && !id(ethernet_rearm_sleep).is_running();"
                 then:
                   - deep_sleep.enter:
                       id: deep_sleep_1
@@ -423,6 +444,12 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  # Ethernet cable link (PHY up), set from the ETH event handler registered on boot.
+  # Up well before DHCP finishes, so deep sleep is held while an address is pending
+  - id: eth_link_up
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   # True when WiFi was released while Ethernet carried the device, which makes
   # the next boot start WiFi-silent
   - id: ethernet_expected
@@ -585,13 +612,16 @@ binary_sensor:
     on_release:
       then:
         - light.turn_off: rgb_light
+        # The wake alarm is over, so ethernet_rearm_sleep may release the hold
+        - lambda: "id(alarm_triggered_on_wake) = false;"
         - if:
             condition:
               and:
                 - switch.is_off: prevent_sleep
                 - binary_sensor.is_off: ota_mode
-                - not:
-                    ethernet.connected:
+                # Not on Ethernet: no IP, no cable link, and not inside the
+                # 60s link-blip window (see ethernet_rearm_sleep)
+                - lambda: "return !id(ethernet_1).is_connected() && !id(eth_link_up) && !id(ethernet_rearm_sleep).is_running();"
             then:
               - lambda: |-
                   ESP_LOGW("Apollo", "Alarm cleared - going back to sleep");
@@ -615,8 +645,9 @@ binary_sensor:
             condition:
               and:
                 - switch.is_off: prevent_sleep
-                - not:
-                    ethernet.connected:
+                # Not on Ethernet: no IP, no cable link, and not inside the
+                # 60s link-blip window (see ethernet_rearm_sleep)
+                - lambda: "return !id(ethernet_1).is_connected() && !id(eth_link_up) && !id(ethernet_rearm_sleep).is_running();"
             then:
               - lambda: |-
                   id(deep_sleep_1).allow_deep_sleep();
@@ -1188,8 +1219,9 @@ button:
             and:
               - switch.is_off: prevent_sleep
               - binary_sensor.is_off: ota_mode
-              - not:
-                  ethernet.connected:
+              # Not on Ethernet: no IP, no cable link, and not inside the
+              # 60s link-blip window (see ethernet_rearm_sleep)
+              - lambda: "return !id(ethernet_1).is_connected() && !id(eth_link_up) && !id(ethernet_rearm_sleep).is_running();"
           then:
             - lambda: |-
                 id(deep_sleep_1).allow_deep_sleep();
@@ -1583,8 +1615,9 @@ switch:
             condition:
               and:
                 - binary_sensor.is_off: ota_mode
-                - not:
-                    ethernet.connected:
+                # Not on Ethernet: no IP, no cable link, and not inside the
+                # 60s link-blip window (see ethernet_rearm_sleep)
+                - lambda: "return !id(ethernet_1).is_connected() && !id(eth_link_up) && !id(ethernet_rearm_sleep).is_running();"
             then:
               - lambda: |-
                   id(deep_sleep_1).allow_deep_sleep();
@@ -1617,6 +1650,23 @@ interval:
           if (orphan != nullptr) {
             vTaskSuspend(orphan);
             ESP_LOGW("ethernet", "No W5500 detected; parked the W5500 helper task");
+          }
+  # Cable link changes (from the ETH event handler): link up holds deep sleep at
+  # once, before DHCP; link down without an address starts the 60s re-arm wait
+  - id: ethernet_link_watch
+    interval: 500ms
+    then:
+      - lambda: |-
+          static bool last = false;
+          const bool now = id(eth_link_up);
+          if (now == last) return;
+          last = now;
+          if (now) {
+            ESP_LOGI("Apollo", "Ethernet link up; preventing deep sleep");
+            id(deep_sleep_1).prevent_deep_sleep();
+            id(ethernet_rearm_sleep).stop();
+          } else if (!id(ethernet_1).is_connected()) {
+            id(ethernet_rearm_sleep).execute();
           }
   # Any DHCP restart wipes lwIP's shared DNS servers
   # Restore the default interface's copy, as CAST_PRO-1 does
@@ -1702,6 +1752,8 @@ script:
             and:
               - not:
                   ethernet.connected:
+              # Cable back in but DHCP still pending: stay awake
+              - lambda: "return !id(eth_link_up);"
               - switch.is_off: prevent_sleep
               - binary_sensor.is_off: ota_mode
               - lambda: "return !id(alarm_triggered_on_wake);"
@@ -2014,7 +2066,7 @@ text_sensor:
       id: eth_ip
       entity_category: "diagnostic"
     mac_address:
-      name: "Ethernet MAC Address"
+      name: "${ethernet_mac_name}"
       id: eth_mac_address
       entity_category: "diagnostic"
       disabled_by_default: true
@@ -2035,7 +2087,7 @@ text_sensor:
       entity_category: "diagnostic"
       disabled_by_default: true
     mac_address:
-      name: "MAC Address"
+      name: "${wifi_mac_name}"
       id: wifi_mac_address
       entity_category: "diagnostic"
       disabled_by_default: true
