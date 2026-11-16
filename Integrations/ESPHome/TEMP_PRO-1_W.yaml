@@ -1,136 +1,22 @@
+# Legacy WiFi-variant shim: builds the unified firmware but keeps the original
+# device/project name and firmware-w/ manifest path so fielded devices keep updating.
+# New installs should use TEMP_PRO-1.yaml.
+
+substitutions:
+  stable_manifest_dir: "firmware-w"
+  beta_manifest_key: "w"
+
 esphome:
   name: "apollo-temp-pro-1-w"
   friendly_name: Apollo TEMP_PRO-1 W
   comment: Apollo TEMP_PRO-1 W
-  name_add_mac_suffix: true
-  platformio_options:
-    board_build.flash_mode: dio
-
   project:
     name: "ApolloAutomation.TEMP_PRO-1-W"
     version: "${version}"
 
-  # improv_ble (renamed from esp32_improv) needs 2026.10
-  min_version: 2026.10.0
-
 dashboard_import:
   package_import_url: github://ApolloAutomation/TEMP_PROJECT-1/Integrations/ESPHome/TEMP_PRO-1_W.yaml
   import_full_config: false
-
-ota:
-  - platform: esphome
-    id: ota_esphome
-  - platform: http_request
-    id: ota_managed
-
-safe_mode:
-
-update:
-  - platform: http_request
-    id: update_http_request
-    name: Firmware Update
-    source: https://apolloautomation.github.io/TEMP_PROJECT-1/firmware-w/manifest.json
-
-logger:
-
-wifi:
-  # Keeps today's no-reboot on lost Wi-Fi; 2026.11 drops the AP exemption
-  reboot_timeout: 0s
-  on_connect:
-    - component.update: update_http_request
-  ap:
-    ssid: "Apollo TEMP_PRO-1 Hotspot"
-
-captive_portal:
-
-improv_serial:
-
-improv_ble:
-  authorizer: none
-
-# WiFi diagnostics
-sensor:
-  - platform: wifi_signal
-    name: RSSI
-    id: wifi_signal_db
-    update_interval: 60s
-    entity_category: "diagnostic"
-
-text_sensor:
-  - platform: wifi_info
-    ip_address:
-      name: "IP Address"
-      id: wifi_ip
-      entity_category: "diagnostic"
-    ssid:
-      name: "Connected SSID"
-      id: wifi_ssid
-      entity_category: "diagnostic"
-      disabled_by_default: true
-    bssid:
-      name: "Connected BSSID"
-      id: wifi_bssid
-      entity_category: "diagnostic"
-      disabled_by_default: true
-    mac_address:
-      name: "MAC Address"
-      id: wifi_mac_address
-      entity_category: "diagnostic"
-      disabled_by_default: true
-
-script:
-  - id: statusCheck
-    then:
-      - if:
-          condition:
-            - lambda: 'return id(ink_ha_connected).state;'
-          then:
-            - logger.log: "Apollo Automation: Connected To HA"
-            - light.turn_on: 
-                id: rgb_light
-                brightness: 100%
-                red: 0%
-                green: 0%
-                blue: 100%
-          else:
-            - if:
-                condition:
-                  - wifi.connected
-                then:
-                  - logger.log: "Apollo Automation: Connected To Wifi"
-                  - light.turn_on: 
-                      id: rgb_light
-                      brightness: 100%
-                      red: 0%
-                      green: 100%
-                      blue: 0%
-                else:
-                  - logger.log: "Apollo Automation: Not Connected To Wifi"
-                  - light.turn_on: 
-                      id: rgb_light
-                      brightness: 100%
-                      red: 100%
-                      green: 100%
-                      blue: 0%
-      - delay: 5s
-      - light.turn_off: rgb_light
-
-select:
-  - platform: template
-    id: firmware_selector
-    name: Firmware Type
-    icon: "mdi:test-tube"
-    entity_category: config
-    optimistic: true
-    restore_value: true
-    options:
-      - "WiFi"
-      - "Ethernet"
-    initial_option: "WiFi"
-    on_value:
-      then:
-        # Picks the WiFi/Ethernet manifest on the selected Firmware Channel
-        - script.execute: apply_ota_source
 
 packages:
   core: !include Core.yaml

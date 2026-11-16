@@ -45,10 +45,11 @@ jobs:
     strategy:
       matrix:
         include:
-          # Beta serves OTA updates only; it builds the same end-user images
-          # as build.yml (stable), one per Firmware Type.
-          - { yaml: Integrations/ESPHome/TEMP_PRO-1_W.yaml,   name: firmware-w-beta }
+          # Same variants as build.yml: the unified image plus the legacy _ETH/_W
+          # shims, so every device that tracks a stable manifest has a beta one.
+          - { yaml: Integrations/ESPHome/TEMP_PRO-1.yaml,     name: firmware-standard }
           - { yaml: Integrations/ESPHome/TEMP_PRO-1_ETH.yaml, name: firmware-e-beta }
+          - { yaml: Integrations/ESPHome/TEMP_PRO-1_W.yaml,   name: firmware-w-beta }
     uses: esphome/workflows/.github/workflows/build.yml@e1432c7b31fec7d24a13dc192953ebac836ed98a # 2026.10.3
     with:
       files: ${{ matrix.yaml }}
@@ -134,8 +135,8 @@ jobs:
               done <<< "$live"
             fi
           fi
-          declare -A DIRS=( [w]=firmware-w-beta [e]=firmware-e-beta )
-          for v in w e; do
+          declare -A DIRS=( [standard]=firmware-standard [e]=firmware-e-beta [w]=firmware-w-beta )
+          for v in standard e w; do
             src="fw/${DIRS[$v]}"
             man=$(find "$src" -name manifest.json | head -1)
             if [ -z "$man" ]; then

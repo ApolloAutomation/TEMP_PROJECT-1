@@ -1,5 +1,5 @@
 substitutions:
-  version: "26.11.15.1"
+  version: "26.11.15.2"
   device_description: TEMP_PRO-1 made by Apollo Automation - version ${version}.
 
   # Manifest URL bases. Stable = GitHub Pages (main branch builds).
@@ -7,20 +7,43 @@ substitutions:
   stable_manifest_base: "https://apolloautomation.github.io/TEMP_PROJECT-1"
   beta_manifest_base: "https://github.com/ApolloAutomation/TEMP_PROJECT-1/releases/download/beta-fw"
 
-  # OTA manifest URLs per Firmware Type (WiFi/Ethernet) and Firmware Channel.
-  # Beta names must match what build-beta.yml uploads (manifest-<key>.json).
-  ota_stable_manifest_w: "${stable_manifest_base}/firmware-w/manifest.json"
-  ota_stable_manifest_e: "${stable_manifest_base}/firmware-e/manifest.json"
-  ota_beta_manifest_w: "${beta_manifest_base}/manifest-w.json"
-  ota_beta_manifest_e: "${beta_manifest_base}/manifest-e.json"
+  # Legacy _W/_ETH shims override these so fielded devices keep their manifest URLs
+  stable_manifest_dir: "firmware"
+  # Must match the manifest-<key>.json names build-beta.yml uploads
+  beta_manifest_key: "standard"
+  ota_stable_manifest: "${stable_manifest_base}/${stable_manifest_dir}/manifest.json"
+  ota_beta_manifest: "${beta_manifest_base}/manifest-${beta_manifest_key}.json"
 
   # Bluetooth Proxy switch state on a device with no stored preference yet
   # (first boot after this switch was added, or after a factory reset).
   bluetooth_proxy_restore_mode: RESTORE_DEFAULT_OFF
+  # "false" keeps WiFi off entirely (Ethernet-only, like the old Ethernet firmware)
+  wifi_fallback: "true"
+  # The legacy _ETH shim sets "true" so an upgraded Ethernet unit's first boot is WiFi-silent
+  ethernet_expected_default: "false"
 
 esphome:
   name: temp-pro-1
+  friendly_name: Apollo TEMP_PRO-1
+  comment: Apollo TEMP_PRO-1
+  name_add_mac_suffix: true
+  platformio_options:
+    board_build.flash_mode: dio
+  # improv_ble (renamed from esp32_improv) needs 2026.10
+  min_version: 2026.10.0
+  # dns_getserver() for the DNS restore interval
+  includes:
+    - <lwip/dns.h>
   on_boot:
+    # Keep WiFi off when Ethernet is expected, so the fallback hotspot can't
+    # broadcast while Ethernet waits for DHCP. Runs after globals restore (800), before wifi setup.
+    - priority: 600
+      then:
+        - if:
+            condition:
+              lambda: "return id(ethernet_expected) || !id(wifi_fallback_on);"
+            then:
+              - lambda: "id(wifi_1).set_enable_on_boot(false);"
     # Publish the firmware version once per boot
     - priority: 500
       then:
@@ -62,6 +85,199 @@ esphome:
                   continuous: true
             else:
               - esp32_ble_tracker.stop_scan:
+    # Ethernet never came up, so bring WiFi back for rejoin or provisioning
+    - priority: -100
+      then:
+        - if:
+            condition:
+              lambda: "return id(ethernet_expected) && id(wifi_fallback_on);"
+            then:
+              - wait_until:
+                  condition:
+                    ethernet.connected:
+                  timeout: 20s
+              # A never-provisioned unit would open the hotspot here, so give a link
+              # behind spanning tree (~30s to forward) more time first
+              - if:
+                  condition:
+                    and:
+                      - not:
+                          ethernet.connected:
+                      - lambda: "return !id(wifi_provisioned);"
+                  then:
+                    - wait_until:
+                        condition:
+                          ethernet.connected:
+                        timeout: 40s
+              - if:
+                  condition:
+                    not:
+                      ethernet.connected:
+                  then:
+                    - lambda: "id(ethernet_expected) = false;"
+                    - script.execute: wifi_reenable_radio
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+  - platform: http_request
+    id: ota_managed
+
+safe_mode:
+
+logger:
+
+update:
+  - platform: http_request
+    id: update_http_request
+    name: Firmware Update
+    source: ${ota_stable_manifest}
+
+# Prefer Ethernet whenever it is connected; ESPHome arbitrates the route
+network:
+  priority:
+    - ethernet
+    - wifi
+
+ethernet:
+  id: ethernet_1
+  type: W5500
+  clk_pin: GPIO10
+  mosi_pin: GPIO12
+  miso_pin: GPIO11
+  cs_pin: GPIO9
+  interrupt_pin: GPIO13
+  reset_pin: GPIO14
+  on_connect:
+    # A wired device never deep sleeps
+    - lambda: |-
+        ESP_LOGI("Apollo", "Ethernet connected; preventing deep sleep");
+        id(deep_sleep_1).prevent_deep_sleep();
+    # Keep WiFi up alongside Ethernet so Home Assistant's connection to the
+    # WiFi address survives; release it only when WiFi has no network to offer
+    - if:
+        condition:
+          wifi.enabled:
+        then:
+          - if:
+              condition:
+                wifi.ap_active:
+              then:
+                # Fallback hotspot is broadcasting: WiFi has no network
+                - script.execute: wifi_release_radio
+              else:
+                # WiFi may still be associating at boot, so wait it out.
+                # Ends early if the fallback AP starts.
+                - wait_until:
+                    condition:
+                      or:
+                        - wifi.connected:
+                        - wifi.ap_active:
+                    timeout: 30s
+                - if:
+                    condition:
+                      wifi.connected:
+                    then:
+                      - lambda: "id(ethernet_expected) = false;"
+                    else:
+                      # Leave WiFi alone if the cable vanished during the wait
+                      - if:
+                          condition:
+                            ethernet.connected:
+                          then:
+                            - script.execute: wifi_release_radio
+        else:
+          # WiFi-silent boot (ethernet_expected): stays off
+          - lambda: "id(ethernet_expected) = true;"
+    - script.execute: check_for_updates
+    - component.update: network_connection
+  on_disconnect:
+    # Off the cable, deep sleep follows Prevent Sleep and OTA Mode again
+    - if:
+        condition:
+          and:
+            - switch.is_off: prevent_sleep
+            - binary_sensor.is_off: ota_mode
+            - lambda: "return !id(alarm_triggered_on_wake);"
+        then:
+          - lambda: "id(deep_sleep_1).allow_deep_sleep();"
+    # Cable gone, so bring WiFi up to rejoin or open the provisioning hotspot
+    - lambda: "id(ethernet_expected) = false;"
+    - if:
+        condition:
+          and:
+            - lambda: "return id(ap_latched);"
+            - not:
+                wifi.connected:
+        then:
+          # ESPHome can't relaunch a once-started hotspot in the same boot, so reboot
+          # into a fresh one, but only for a real cable pull (not a link blip)
+          - wait_until:
+              condition:
+                ethernet.connected:
+              timeout: 15s
+          - if:
+              condition:
+                and:
+                  - not:
+                      ethernet.connected:
+                  - not:
+                      wifi.connected:
+              then:
+                - lambda: |-
+                    ESP_LOGW("network", "Cable removed after the hotspot was released; rebooting to restore provisioning");
+                - delay: 500ms
+                - lambda: "App.safe_reboot();"
+        else:
+          - if:
+              condition:
+                lambda: "return id(wifi_fallback_on);"
+              then:
+                - script.execute: wifi_reenable_radio
+    - component.update: network_connection
+
+wifi:
+  id: wifi_1
+  on_connect:
+    # Must stay set: gates the recovery probe so it never pops the hotspot on
+    # a device that was never provisioned
+    - lambda: "id(wifi_provisioned) = true;"
+    - script.execute: check_for_updates
+    - component.update: network_connection
+  on_disconnect:
+    # Turn WiFi off after 60s without reassociation, which keeps the 90s
+    # fallback hotspot from ever starting while Ethernet carries the device
+    - if:
+        condition:
+          ethernet.connected:
+        then:
+          - wait_until:
+              condition:
+                wifi.connected:
+              timeout: 60s
+          - if:
+              condition:
+                and:
+                  - wifi.enabled:
+                  - not:
+                      wifi.connected:
+                  - ethernet.connected:
+              then:
+                - script.execute: wifi_release_radio
+    - component.update: network_connection
+  # Keeps today's no-reboot on lost Wi-Fi; 2026.11 drops the AP exemption
+  reboot_timeout: 0s
+  ap:
+    ssid: "Apollo TEMP_PRO-1 Hotspot"
+
+captive_portal:
+  id: captive_portal_1
+
+improv_serial:
+
+improv_ble:
+  id: esp32_improv_1
+  authorizer: none
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -172,6 +388,9 @@ api:
                     - lambda: 'return !id(alarm_triggered_on_wake);'
                     - switch.is_off: prevent_sleep
                     - binary_sensor.is_off: ota_mode
+                    # A wired device never deep sleeps
+                    - not:
+                        ethernet.connected:
                 then:
                   - deep_sleep.enter:
                       id: deep_sleep_1
@@ -209,6 +428,39 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  # True when WiFi was released while Ethernet carried the device, which makes
+  # the next boot start WiFi-silent
+  - id: ethernet_expected
+    type: bool
+    restore_value: yes
+    initial_value: '${ethernet_expected_default}'
+  # True once WiFi has ever connected, which gates the WiFi recovery probe
+  - id: wifi_provisioned
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  # One update check per boot, on whichever interface connects first
+  - id: update_checked
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # True once the hotspot has run and been released this boot (it can't relaunch
+  # until the next reboot)
+  - id: ap_latched
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # The wifi_fallback substitution as a bool; false is accepted quoted or unquoted
+  - id: wifi_fallback_on
+    type: bool
+    restore_value: no
+    initial_value: 'std::string_view("${wifi_fallback}") != "false" && std::string_view("${wifi_fallback}") != "False"'
+  # True when WiFi networks come from YAML; set in the initializer (after wifi adds YAML
+  # networks, before saved ones load) so a user's on_boot override can't drop it
+  - id: wifi_yaml_networks
+    type: bool
+    restore_value: no
+    initial_value: 'wifi::global_wifi_component != nullptr && wifi::global_wifi_component->has_sta()'
 
 i2c:
   sda: GPIO16
@@ -343,6 +595,8 @@ binary_sensor:
               and:
                 - switch.is_off: prevent_sleep
                 - binary_sensor.is_off: ota_mode
+                - not:
+                    ethernet.connected:
             then:
               - lambda: |-
                   ESP_LOGW("Apollo", "Alarm cleared - going back to sleep");
@@ -364,12 +618,21 @@ binary_sensor:
       then:
         - if:
             condition:
-              switch.is_off: prevent_sleep
+              and:
+                - switch.is_off: prevent_sleep
+                - not:
+                    ethernet.connected:
             then:
               - lambda: |-
                   id(deep_sleep_1).allow_deep_sleep();
 
 sensor:
+  - platform: wifi_signal
+    name: RSSI
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: "diagnostic"
+
   - platform: internal_temperature
     name: "ESP Temperature"
     id: sys_esp_temperature
@@ -930,6 +1193,8 @@ button:
             and:
               - switch.is_off: prevent_sleep
               - binary_sensor.is_off: ota_mode
+              - not:
+                  ethernet.connected:
           then:
             - lambda: |-
                 id(deep_sleep_1).allow_deep_sleep();
@@ -1321,7 +1586,10 @@ switch:
       then:
         - if:
             condition:
-              binary_sensor.is_off: ota_mode
+              and:
+                - binary_sensor.is_off: ota_mode
+                - not:
+                    ethernet.connected:
             then:
               - lambda: |-
                   id(deep_sleep_1).allow_deep_sleep();
@@ -1340,6 +1608,57 @@ switch:
       - esp32_ble_tracker.stop_scan:
 
 interval:
+  # No W5500 detected: park the driver's helper task so it can't crash the device polling
+  # a floating SPI bus. Runs once after setup, from an interval so on_boot overrides can't drop it
+  - id: w5500_park_interval
+    interval: 1s
+    then:
+      - lambda: |-
+          static bool checked = false;
+          if (checked) return;
+          checked = true;
+          if (!id(ethernet_1).is_failed()) return;
+          TaskHandle_t orphan = xTaskGetHandle("w5500_tsk");
+          if (orphan != nullptr) {
+            vTaskSuspend(orphan);
+            ESP_LOGW("ethernet", "No W5500 detected; parked the W5500 helper task");
+          }
+  # Any DHCP restart wipes lwIP's shared DNS servers
+  # Restore the default interface's copy, as CAST_PRO-1 does
+  - id: dns_restore_interval
+    interval: 16ms
+    then:
+      - lambda: |-
+          esp_netif_t *netif = esp_netif_get_default_netif();
+          if (netif == nullptr || !ip_addr_isany(dns_getserver(0))) return;
+          bool restored = false;
+          for (auto type : {ESP_NETIF_DNS_MAIN, ESP_NETIF_DNS_BACKUP}) {
+            esp_netif_dns_info_t dns{};
+            if (esp_netif_get_dns_info(netif, type, &dns) == ESP_OK && dns.ip.u_addr.ip4.addr != 0) {
+              esp_netif_set_dns_info(netif, type, &dns);
+              restored = true;
+            }
+          }
+          static bool logged = false;
+          if (restored && !logged) {
+            logged = true;
+            ESP_LOGI("network", "DHCP restart cleared DNS; restored the %s servers", esp_netif_get_desc(netif));
+          }
+  # Retry a released WiFi while Ethernet is up, so an outage doesn't leave the
+  # radio silent until the next cable pull
+  - id: wifi_recovery_interval
+    interval: 10min
+    then:
+      - if:
+          condition:
+            and:
+              - ethernet.connected:
+              - not:
+                  wifi.enabled:
+              - lambda: "return id(wifi_provisioned) && id(wifi_fallback_on);"
+          then:
+            - script.execute: wifi_recovery_probe
+
   - interval: 10s
     startup_delay: 60s
     then:
@@ -1373,19 +1692,116 @@ interval:
 
 script:
   - id: apply_ota_source
-    # Sets the OTA manifest URL from the Firmware Type (WiFi/Ethernet) and
-    # Firmware Channel (Stable/Beta) selects. Literal URLs only: the update
+    # Sets the OTA manifest URL from the Firmware Channel select (Stable/Beta).
+    # The manifests are per-variant (ota_*_manifest substitutions) so the legacy
+    # _W/_ETH builds keep their own manifests. Literal URLs only: the update
     # entity keeps the raw pointer.
     then:
       - lambda: |-
           const bool beta = id(firmware_channel).current_option() == "Beta";
-          const bool eth = id(firmware_selector).current_option() == "Ethernet";
-          const char *url = eth
-              ? (beta ? "${ota_beta_manifest_e}" : "${ota_stable_manifest_e}")
-              : (beta ? "${ota_beta_manifest_w}" : "${ota_stable_manifest_w}");
+          const char *url = beta ? "${ota_beta_manifest}" : "${ota_stable_manifest}";
           ESP_LOGI("firmware", "OTA manifest set to: %s", url);
           id(update_http_request).set_source_url(url);
       - component.update: update_http_request
+
+  - id: check_for_updates
+    # One manifest check per boot, on whichever interface connects first
+    then:
+      - if:
+          condition:
+            lambda: "return !id(update_checked);"
+          then:
+            - lambda: "id(update_checked) = true;"
+            - component.update: update_http_request
+
+  - id: wifi_recovery_probe
+    # Re-attempt WiFi while Ethernet carries the device; a rejoin restores dual-home
+    then:
+      - script.execute: wifi_reenable_radio
+      - wait_until:
+          condition:
+            wifi.connected:
+          timeout: 60s
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - lambda: "id(ethernet_expected) = false;"
+          else:
+            - if:
+                condition:
+                  ethernet.connected:
+                then:
+                  - script.execute: wifi_release_radio
+
+  - id: wifi_reenable_radio
+    # With provisioned (not YAML) networks, clear the STA list so start() reloads from and
+    # saves to the boot-time NVS key; a second start() in one boot would otherwise switch keys
+    then:
+      - lambda: |-
+          if (id(wifi_1).is_disabled() && !id(wifi_yaml_networks)) {
+            id(wifi_1).clear_sta();
+          }
+      - wifi.enable:
+
+  - id: wifi_release_radio
+    # Turn WiFi off while Ethernet carries the device, ending AP+STA and the captive
+    # portal. A live hotspot is only remembered (ap_latched); the reboot that clears
+    # it happens on cable removal, never at cable connect, so a slow link can't loop.
+    then:
+      - lambda: "id(ethernet_expected) = true;"
+      - if:
+          condition:
+            wifi.ap_active:
+          then:
+            - lambda: |-
+                id(ap_latched) = true;
+                ESP_LOGW("network", "Releasing the active hotspot; Ethernet carries the device");
+      - wifi.disable:
+      # Also stop Improv BLE so the device isn't offered for WiFi setup it can't complete
+      - lambda: |-
+          if (id(captive_portal_1).is_active()) {
+            id(captive_portal_1).end();
+          }
+          id(esp32_improv_1).stop();
+
+  - id: statusCheck
+    then:
+      - if:
+          condition:
+            - lambda: 'return id(ink_ha_connected).state;'
+          then:
+            - logger.log: "Apollo Automation: Connected To HA"
+            - light.turn_on:
+                id: rgb_light
+                brightness: 100%
+                red: 0%
+                green: 0%
+                blue: 100%
+          else:
+            - if:
+                condition:
+                  or:
+                    - ethernet.connected:
+                    - wifi.connected:
+                then:
+                  - logger.log: "Apollo Automation: Connected To Network"
+                  - light.turn_on:
+                      id: rgb_light
+                      brightness: 100%
+                      red: 0%
+                      green: 100%
+                      blue: 0%
+                else:
+                  - logger.log: "Apollo Automation: Not Connected To Network"
+                  - light.turn_on:
+                      id: rgb_light
+                      brightness: 100%
+                      red: 100%
+                      green: 100%
+                      blue: 0%
+      - delay: 5s
+      - light.turn_off: rgb_light
 
   - id: testScript
     then:
@@ -1545,7 +1961,67 @@ text_sensor:
       id: ld2412_bt_mac
       disabled_by_default: true
 
-  # Diagnostics (network ones are in the W/ETH files)
+  # Which path is carrying the device, for troubleshooting and HA notifications
+  - platform: template
+    name: "Network Connection"
+    id: network_connection
+    icon: "mdi:network"
+    entity_category: "diagnostic"
+    update_interval: 10s
+    lambda: |-
+      const bool eth = id(ethernet_1).is_connected();
+      const bool sta = !id(wifi_1).is_disabled() && id(wifi_1).is_connected();
+      const bool ap  = !id(wifi_1).is_disabled() && id(wifi_1).is_ap_active();
+      if (eth && sta) return std::string("Ethernet + WiFi");
+      if (eth) return std::string("Ethernet");
+      if (sta) return std::string("WiFi");
+      if (ap) return std::string("Hotspot");
+      return std::string("Connecting");
+
+  # Keeps the legacy IP Address entity for existing dashboards; shows the address in use, Ethernet first
+  - platform: template
+    name: "IP Address"
+    id: legacy_ip_address
+    entity_category: "diagnostic"
+    update_interval: 10s
+    lambda: |-
+      if (id(ethernet_1).is_connected()) return id(eth_ip).state;
+      if (!id(wifi_1).is_disabled() && id(wifi_1).is_connected()) return id(wifi_ip).state;
+      return {};
+
+  - platform: ethernet_info
+    ip_address:
+      name: "Ethernet IP Address"
+      id: eth_ip
+      entity_category: "diagnostic"
+    mac_address:
+      name: "Ethernet MAC Address"
+      id: eth_mac_address
+      entity_category: "diagnostic"
+      disabled_by_default: true
+
+  - platform: wifi_info
+    ip_address:
+      name: "WiFi IP Address"
+      id: wifi_ip
+      entity_category: "diagnostic"
+    ssid:
+      name: "Connected SSID"
+      id: wifi_ssid
+      entity_category: "diagnostic"
+      disabled_by_default: true
+    bssid:
+      name: "Connected BSSID"
+      id: wifi_bssid
+      entity_category: "diagnostic"
+      disabled_by_default: true
+    mac_address:
+      name: "MAC Address"
+      id: wifi_mac_address
+      entity_category: "diagnostic"
+      disabled_by_default: true
+
+  # Other diagnostics
   - platform: version
     name: "ESPHome Version"
     id: esphome_version
