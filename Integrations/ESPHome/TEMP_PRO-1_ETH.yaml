@@ -10,7 +10,8 @@ esphome:
     name: "ApolloAutomation.TEMP_PRO-1-ETH"
     version: "${version}"
 
-  min_version: 2025.11.0
+  # improv_ble (renamed from esp32_improv) needs 2026.10
+  min_version: 2026.10.0
 
 dashboard_import:
   package_import_url: github://ApolloAutomation/TEMP_PROJECT-1/Integrations/ESPHome/TEMP_PRO-1_ETH.yaml
@@ -21,9 +22,6 @@ ota:
     id: ota_esphome
   - platform: http_request
     id: ota_managed
-
-http_request:
-  verify_ssl: true
 
 safe_mode:
 
@@ -43,6 +41,8 @@ ethernet:
   cs_pin: GPIO9
   interrupt_pin: GPIO13
   reset_pin: GPIO14
+  on_connect:
+    - component.update: update_http_request
 
 # Ethernet diagnostics
 text_sensor:
@@ -71,6 +71,26 @@ script:
                 red: 0%
                 green: 0%
                 blue: 100%
+          else:
+            - if:
+                condition:
+                  - ethernet.connected:
+                then:
+                  - logger.log: "Apollo Automation: Connected To Network"
+                  - light.turn_on:
+                      id: rgb_light
+                      brightness: 100%
+                      red: 0%
+                      green: 100%
+                      blue: 0%
+                else:
+                  - logger.log: "Apollo Automation: Not Connected To Network"
+                  - light.turn_on:
+                      id: rgb_light
+                      brightness: 100%
+                      red: 100%
+                      green: 100%
+                      blue: 0%
       - delay: 5s
       - light.turn_off: rgb_light
 
@@ -88,17 +108,8 @@ select:
     initial_option: "Ethernet"
     on_value:
       then:
-        - if:
-            condition:
-              lambda: 'return id(firmware_selector).current_option() == "Ethernet";'
-            then:
-              - logger.log: "OTA updates set to use ethernet firmware"
-              - lambda: id(update_http_request).set_source_url("https://apolloautomation.github.io/TEMP_PROJECT-1/firmware-e/manifest.json");
-              - component.update: update_http_request
-            else:
-              - logger.log: "OTA updates set to use wifi firmware"
-              - lambda: id(update_http_request).set_source_url("https://apolloautomation.github.io/TEMP_PROJECT-1/firmware-w/manifest.json");
-              - component.update: update_http_request
+        # Picks the WiFi/Ethernet manifest on the selected Firmware Channel
+        - script.execute: apply_ota_source
 
 
 packages:
