@@ -491,6 +491,8 @@ i2c:
 
 web_server:
   port: 80
+  # No firmware upload from the device page; the setup hotspot still allows it
+  ota: false
 
 deep_sleep:
   id: deep_sleep_1
